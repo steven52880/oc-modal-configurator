@@ -1,0 +1,14 @@
+.venv/
+.dev/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.bak
+*.tmp
+
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+packaging/output/
+packaging/work/
