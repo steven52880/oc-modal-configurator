@@ -1,3 +1,3 @@
 """Local backend for the OpenCode configuration editor."""
 
-__version__ = "1.1"
+__version__ = "1.2"

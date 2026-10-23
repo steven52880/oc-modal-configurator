@@ -107,6 +107,11 @@ export const appTheme = createTheme({
             transitionDuration: "0.01ms !important",
           },
         },
+        // Popper（Autocomplete 下拉、Tooltip）在 popper.js 首次定位前没有 data-popper-placement，
+        // WebView2 下这一帧会被绘制出来，表现为下拉框先闪现在左下角；定位完成前先隐藏
+        ".MuiPopper-root:not([data-popper-placement])": {
+          visibility: "hidden",
+        },
       },
     },
     MuiButton: {

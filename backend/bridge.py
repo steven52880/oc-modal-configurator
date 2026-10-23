@@ -9,6 +9,7 @@ from backend.ccswitch_service import CcSwitchService
 from backend.config_service import ConfigService
 from backend.errors import ServiceError
 from backend.metadata_service import MetadataService
+from backend.param_templates import generate_many
 from backend.provider_probe import probe_provider_models
 from backend.secrets import describe_api_key
 from backend.settings_store import SettingsStore
@@ -68,6 +69,9 @@ class Bridge:
 
     def match_models_defaults(self, items: list) -> dict:
         return self._call(lambda: self._metadata.match_many(items))
+
+    def generate_model_params(self, items: list) -> dict:
+        return self._call(lambda: generate_many(self._metadata, items))
 
     def probe_provider_models(
         self,

@@ -17,6 +17,7 @@ PUBLIC_METHODS = (
     "reload_metadata_cache",
     "match_model_defaults",
     "match_models_defaults",
+    "generate_model_params",
     "probe_provider_models",
     "search_catalog",
     "describe_api_key",

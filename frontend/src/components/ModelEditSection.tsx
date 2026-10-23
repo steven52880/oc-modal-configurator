@@ -28,9 +28,10 @@ import VideocamOutlinedIcon from "@mui/icons-material/VideocamOutlined";
 import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
 import { bridge } from "../api/bridge";
 import {
+  DEFAULT_NPM,
   INTERLEAVED_FIELDS,
   MODALITIES,
-  NPM_PRESETS,
+  MODEL_NPM_OPTIONS,
   REASONING_EFFORTS,
   TEXT_VERBOSITY,
   VARIANT_ORDER,
@@ -46,6 +47,8 @@ import {
 import {
   MIXED_PLACEHOLDER,
   MODALITY_META,
+  displayNpm,
+  normalizeNpmInput,
   VARIANT_META,
   type KnownModality,
 } from "../utils/modelHelpers";
@@ -141,15 +144,21 @@ function deserializeInterleavedSelect(raw: string): boolean | string | null {
 interface ModelEditSectionProps {
   targets: ModelEntry[];
   providerKey: string;
+  /** 所属提供商的 npm，模型未覆盖时继承它 */
+  providerNpm?: string | null;
   existingKeys: string[];
   isBatch: boolean;
   onSave: (updated: ModelEntry[]) => void;
   onCancel: () => void;
 }
 
+/** 协议下拉中「继承提供商」选项的显示文本（选中即清除覆盖） */
+const NPM_INHERIT_LABEL = "(继承提供商)";
+
 export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
   targets,
   providerKey,
+  providerNpm = null,
   existingKeys,
   isBatch,
   onSave,
@@ -330,7 +339,8 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
     () => isBatch && !isSame((m) => m.provider.npm ?? ""),
   );
   const [providerNpmText, setProviderNpmText] = useState<string>(() =>
-    isBatch && !isSame((m) => m.provider.npm ?? "") ? "" : first.provider.npm ?? "",
+    // 输入框内显示短名，保存时由 normalizeNpmInput 补全为完整包名
+    isBatch && !isSame((m) => m.provider.npm ?? "") ? "" : displayNpm(first.provider.npm),
   );
 
   const [providerApiMixed, setProviderApiMixed] = useState<boolean>(
@@ -415,12 +425,6 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
     };
     if (metaSource.family) items.push(`家族: ${metaSource.family}`);
     if (metaSource.release_date) items.push(`发布: ${metaSource.release_date}`);
-    if (metaSource.last_updated) items.push(`更新: ${metaSource.last_updated}`);
-    if (metaSource.knowledge) items.push(`知识库: ${metaSource.knowledge}`);
-    if (metaSource.open_weights !== null && metaSource.open_weights !== undefined) {
-      items.push(`开源权重: ${metaSource.open_weights ? "是" : "否"}`);
-    }
-    if (metaSource.canonical_model_id) items.push(`标准 ID: ${metaSource.canonical_model_id}`);
     if (metaSource.status) items.push(`状态: ${metaSource.status}`);
     return items;
   }, [first.meta, defaults]);
@@ -460,7 +464,6 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
 
   const advancedAccordionCount = useMemo(() => {
     let count = 0;
-    if (!providerNpmMixed && providerNpmText.trim() !== "") count += 1;
     if (!providerApiMixed && providerApiText.trim() !== "") count += 1;
     if (!idMixed && idText.trim() !== "") count += 1;
     if (!headersMixed) count += headerRows.filter((r) => r.name.trim() !== "").length;
@@ -468,8 +471,6 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
     if (variantsJsonText.trim() !== "") count += 1;
     return count;
   }, [
-    providerNpmMixed,
-    providerNpmText,
     providerApiMixed,
     providerApiText,
     idMixed,
@@ -736,7 +737,7 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
         headers: headersMixed ? target.headers : rowsToHeaderMap(headerRows),
         provider: {
           ...target.provider,
-          npm: providerNpmMixed ? target.provider.npm : providerNpmText.trim() || null,
+            npm: providerNpmMixed ? target.provider.npm : normalizeNpmInput(providerNpmText) || null,
           api: providerApiMixed ? target.provider.api : providerApiText.trim() || null,
           extra: { ...(target.provider.extra ?? {}) },
         },
@@ -824,6 +825,61 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
               }}
             />
           </Box>
+        </Box>
+
+        {/* Group 1b: 协议 (provider.npm)，模型级覆盖，留空继承提供商 */}
+        <Box>
+          <Autocomplete
+            freeSolo
+            options={[NPM_INHERIT_LABEL, ...MODEL_NPM_OPTIONS.map(displayNpm)]}
+            value={providerNpmText}
+            inputValue={providerNpmText}
+            onInputChange={(_, newInput, reason) => {
+              if (reason === "input" || reason === "clear") {
+                setProviderNpmMixed(false);
+                setProviderNpmText(newInput === NPM_INHERIT_LABEL ? "" : newInput);
+              }
+            }}
+            onChange={(_, newVal) => {
+              setProviderNpmMixed(false);
+              const text = typeof newVal === "string" ? newVal : "";
+              setProviderNpmText(text === NPM_INHERIT_LABEL ? "" : text);
+            }}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="协议 (provider.npm)"
+                placeholder={
+                  providerNpmMixed
+                    ? MIXED_PLACEHOLDER
+                    : `继承：${displayNpm(providerNpm?.trim() || DEFAULT_NPM)}`
+                }
+                helperText={
+                  providerNpmMixed
+                    ? `${MIXED_PLACEHOLDER} 保持各行原值；选择「${NPM_INHERIT_LABEL}」统一清除覆盖`
+                    : `留空则继承提供商（${displayNpm(providerNpm?.trim() || DEFAULT_NPM)}）；同一提供商下混用 Responses / Chat Completions / Anthropic 协议时可单独覆盖`
+                }
+                sx={{
+                  "& .MuiInputBase-input": { fontFamily: MONOSPACE_FONT },
+                  "& .MuiInputBase-input::placeholder": { color: "#94a3b8", opacity: 1 },
+                }}
+              />
+            )}
+          />
+          {defaults?.catalogNpm && (
+            <Chip
+              icon={<AutoFixHighIcon sx={{ fontSize: "13px !important" }} />}
+              label={`默认: ${displayNpm(defaults.catalogNpm)}`}
+              size="small"
+              color="primary"
+              variant="outlined"
+              onClick={() => {
+                setProviderNpmMixed(false);
+                setProviderNpmText(displayNpm(defaults.catalogNpm));
+              }}
+              sx={{ mt: 0.5 }}
+            />
+          )}
         </Box>
 
         {/* Group 2: Token Limits (limit.context & limit.output) */}
@@ -1577,50 +1633,6 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
         </AccordionSummary>
         <AccordionDetails>
           <Stack spacing={2}>
-            <Box>
-              <Autocomplete
-                freeSolo
-                options={[...NPM_PRESETS]}
-                value={providerNpmText}
-                inputValue={providerNpmText}
-                onInputChange={(_, newInput, reason) => {
-                  if (reason === "input" || reason === "clear") {
-                    setProviderNpmMixed(false);
-                    setProviderNpmText(newInput);
-                  }
-                }}
-                onChange={(_, newVal) => {
-                  setProviderNpmMixed(false);
-                  setProviderNpmText(typeof newVal === "string" ? newVal : "");
-                }}
-                renderInput={(params) => (
-                  <TextField
-                    {...params}
-                    label="单模型驱动包覆盖 (provider.npm)"
-                    placeholder={providerNpmMixed ? MIXED_PLACEHOLDER : "留空则继承所属提供商的 npm 类型"}
-                    helperText="当同一提供商下混用 /v1/responses (@ai-sdk/openai) 与 /v1/chat/completions (@ai-sdk/openai-compatible) 模型时可单独覆盖"
-                    sx={{
-                      "& .MuiInputBase-input": { fontFamily: MONOSPACE_FONT },
-                    }}
-                  />
-                )}
-              />
-              {defaults?.catalogNpm && (
-                <Chip
-                  icon={<AutoFixHighIcon sx={{ fontSize: "13px !important" }} />}
-                  label={`默认: ${defaults.catalogNpm}`}
-                  size="small"
-                  color="primary"
-                  variant="outlined"
-                  onClick={() => {
-                    setProviderNpmMixed(false);
-                    setProviderNpmText(defaults.catalogNpm ?? "");
-                  }}
-                  sx={{ mt: 0.5 }}
-                />
-              )}
-            </Box>
-
             <Box
               sx={{
                 display: "grid",

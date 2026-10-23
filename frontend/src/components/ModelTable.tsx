@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Autocomplete,
   Box,
   Button,
   Checkbox,
@@ -24,14 +25,17 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import ClearAllIcon from "@mui/icons-material/ClearAll";
 import TuneIcon from "@mui/icons-material/Tune";
+import SettingsSuggestIcon from "@mui/icons-material/SettingsSuggest";
 import TextFieldsIcon from "@mui/icons-material/TextFields";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import GraphicEqIcon from "@mui/icons-material/GraphicEq";
 import VideocamOutlinedIcon from "@mui/icons-material/VideocamOutlined";
 import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
 import {
+  DEFAULT_NPM,
   MODALITIES,
   MODEL_COLUMN_IDS,
+  MODEL_NPM_OPTIONS,
   VARIANT_ORDER,
   type ModelEntry,
   type ProviderEntry,
@@ -45,12 +49,14 @@ import {
   getPrefixColor,
   serializeModalities,
   serializeVariants,
+  displayNpm,
   sortModelsForDisplay,
   type KnownModality,
 } from "../utils/modelHelpers";
 import { MONOSPACE_FONT } from "../theme";
 
 export type ModelColumnId = (typeof MODEL_COLUMN_IDS)[number];
+type InlineColumnId = "key" | "context" | "output" | "npm";
 
 const DEFAULT_MODEL_WIDTHS: Record<ModelColumnId, number> = {
   key: 240,
@@ -59,6 +65,7 @@ const DEFAULT_MODEL_WIDTHS: Record<ModelColumnId, number> = {
   inputModalities: 136,
   outputModalities: 136,
   variants: 336,
+  npm: 130,
 };
 
 const MODALITY_ICONS: Record<KnownModality, React.ElementType> = {
@@ -76,7 +83,11 @@ const COLUMN_LABELS: Record<ModelColumnId, string> = {
   inputModalities: "输入模态",
   outputModalities: "输出模态",
   variants: "变体 (Variants)",
+  npm: "协议",
 };
+
+/** 内联编辑中「继承提供商」选项的显示文本 */
+const NPM_INHERIT_LABEL = "(继承提供商)";
 
 interface ModelTableProps {
   provider: ProviderEntry | null;
@@ -97,6 +108,9 @@ interface ModelTableProps {
   ) => void;
   onToggleModelVariant: (modelKey: string, variantKey: string, checked: boolean) => void;
   onApplySelectionDefaults: (rowIds: string[], columnIds: string[]) => void;
+  /** 按 models.dev × 协议为已勾选的模型重新生成变体 / 交错思考 / 温度 */
+  onGenerateParams: (keys: string[]) => void;
+  generatingParams?: boolean;
   onAddBlankModel: () => void;
   onOpenAddModelsDialog: () => void;
   onOpenSingleEdit: (modelKey: string) => void;
@@ -116,6 +130,8 @@ export const ModelTable: React.FC<ModelTableProps> = ({
   onToggleModelModality,
   onToggleModelVariant,
   onApplySelectionDefaults,
+  onGenerateParams,
+  generatingParams = false,
   onAddBlankModel,
   onOpenAddModelsDialog,
   onOpenSingleEdit,
@@ -127,7 +143,7 @@ export const ModelTable: React.FC<ModelTableProps> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [editingCell, setEditingCell] = useState<{
     rowId: string;
-    columnId: "key" | "context" | "output";
+    columnId: InlineColumnId;
   } | null>(null);
   const [editingValue, setEditingValue] = useState<string>("");
 
@@ -181,6 +197,9 @@ export const ModelTable: React.FC<ModelTableProps> = ({
           return serializeModalities(m.modalities?.output);
         case "variants":
           return serializeVariants(m.variants);
+        case "npm":
+          // 仅返回模型级覆盖值；继承时为空，粘贴空值即清除覆盖
+          return m.provider?.npm ?? "";
         default:
           return "";
       }
@@ -235,15 +254,18 @@ export const ModelTable: React.FC<ModelTableProps> = ({
     }
   }, [selection.rect]);
 
-  const startInlineEdit = (rowId: string, columnId: "key" | "context" | "output") => {
+  const startInlineEdit = (rowId: string, columnId: InlineColumnId) => {
     setEditingCell({ rowId, columnId });
-    setEditingValue(getValue(rowId, columnId));
+    const current = getValue(rowId, columnId);
+    // 协议列编辑时显示短名，提交时由 normalizeNpmInput 补全
+    setEditingValue(columnId === "npm" ? displayNpm(current) : current);
   };
 
-  const commitInlineEdit = () => {
+  const commitInlineEdit = (override?: string) => {
     if (!editingCell) return;
     const { rowId, columnId } = editingCell;
-    const val = editingValue;
+    const raw = override ?? editingValue;
+    const val = columnId === "npm" && raw.trim() === NPM_INHERIT_LABEL ? "" : raw;
     setEditingCell(null);
     const res = onUpdateModelCell(rowId, columnId, val);
     if (!res.ok && res.error) {
@@ -396,6 +418,20 @@ export const ModelTable: React.FC<ModelTableProps> = ({
               </Button>
             </span>
           </Tooltip>
+          <Tooltip title="按 models.dev 与当前协议，为已勾选的模型重新生成变体、交错思考与温度（不改 options）">
+            <span>
+              <Button
+                size="small"
+                variant="outlined"
+                color="primary"
+                disabled={!provider || checkedKeys.length === 0 || generatingParams}
+                startIcon={<SettingsSuggestIcon fontSize="small" />}
+                onClick={() => onGenerateParams(checkedKeys)}
+              >
+                {generatingParams ? "生成中" : "生成参数"}
+              </Button>
+            </span>
+          </Tooltip>
           <Tooltip title="批量编辑已勾选的模型">
             <span>
               <Button
@@ -442,6 +478,11 @@ export const ModelTable: React.FC<ModelTableProps> = ({
       {/* Spreadsheet Table Container */}
       <TableContainer
         onPointerDown={(e) => {
+          // 通过 Portal 渲染的下拉框（Autocomplete Popper）事件也会冒泡到这里，
+          // 但它们不在表格 DOM 内，不能让它们触发失焦，否则行内编辑会在点选前被提交关闭
+          if (!(e.target instanceof Node) || !e.currentTarget.contains(e.target)) return;
+          // 点击行内编辑控件自身（如下拉箭头按钮）时同样保持焦点
+          if (e.target instanceof Element && e.target.closest(".MuiAutocomplete-root")) return;
           if (
             !(
               e.target instanceof Element &&
@@ -526,7 +567,7 @@ export const ModelTable: React.FC<ModelTableProps> = ({
           <TableBody>
             {!provider ? (
               <TableRow>
-                <TableCell colSpan={9} sx={{ py: 6, textAlign: "center" }}>
+                <TableCell colSpan={MODEL_COLUMN_IDS.length + 3} sx={{ py: 6, textAlign: "center" }}>
                   <Typography variant="body2" sx={{ color: "text.secondary" }}>
                     请先在上方提供商表格中选择或新建一个提供商
                   </Typography>
@@ -534,7 +575,7 @@ export const ModelTable: React.FC<ModelTableProps> = ({
               </TableRow>
             ) : displayModels.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} sx={{ py: 5, textAlign: "center" }}>
+                <TableCell colSpan={MODEL_COLUMN_IDS.length + 3} sx={{ py: 5, textAlign: "center" }}>
                   <Typography variant="body2" sx={{ color: "text.secondary", mb: 1.5 }}>
                     提供商 <strong>{provider.name || provider.key}</strong> 下暂无模型配置
                   </Typography>
@@ -635,7 +676,7 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                               size="small"
                               value={editingValue}
                               onChange={(e) => setEditingValue(e.target.value)}
-                              onBlur={commitInlineEdit}
+                              onBlur={() => commitInlineEdit()}
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") {
                                   e.preventDefault();
@@ -730,7 +771,7 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                               type="number"
                               value={editingValue}
                               onChange={(e) => setEditingValue(e.target.value)}
-                              onBlur={commitInlineEdit}
+                              onBlur={() => commitInlineEdit()}
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") {
                                   e.preventDefault();
@@ -949,6 +990,85 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                               </Tooltip>
                             )}
                           </Stack>
+                        </TableCell>
+                      );
+                    })()}
+
+                    {/* Column: npm (模型级协议覆盖) */}
+                    {(() => {
+                      const colId: ModelColumnId = "npm";
+                      const cellSelected = selection.isSelected(model.key, colId);
+                      const pasteCol = selection.isPasteColumn(colId);
+                      const isEditing =
+                        editingCell?.rowId === model.key && editingCell?.columnId === "npm";
+                      const override = model.provider?.npm?.trim() || "";
+                      const inherited = provider?.npm?.trim() || DEFAULT_NPM;
+                      const shown = override || inherited;
+
+                      return (
+                        <TableCell
+                          data-sheet-cell="true"
+                          data-row-id={model.key}
+                          data-col-id={colId}
+                          onDoubleClick={() => startInlineEdit(model.key, "npm")}
+                          sx={{
+                            cursor: "cell",
+                            fontFamily: MONOSPACE_FONT,
+                            backgroundColor: cellSelected
+                              ? "rgba(27, 97, 201, 0.14)"
+                              : pasteCol
+                                ? "rgba(2, 136, 209, 0.05)"
+                                : undefined,
+                            outline: cellSelected ? "1.5px solid #1b61c9" : undefined,
+                            outlineOffset: -1,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {isEditing ? (
+                            <Autocomplete
+                              freeSolo
+                              openOnFocus
+                              size="small"
+                              options={[NPM_INHERIT_LABEL, ...MODEL_NPM_OPTIONS.map(displayNpm)]}
+                              inputValue={editingValue}
+                              onInputChange={(_, v) => setEditingValue(v)}
+                              onChange={(_, v) => {
+                                if (typeof v === "string") commitInlineEdit(v);
+                              }}
+                              renderInput={(params) => (
+                                <TextField
+                                  {...params}
+                                  autoFocus
+                                  placeholder={`继承：${displayNpm(inherited)}`}
+                                  onBlur={() => commitInlineEdit()}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Escape") {
+                                      e.preventDefault();
+                                      cancelInlineEdit();
+                                    }
+                                  }}
+                                  sx={{
+                                    "& .MuiInputBase-input": {
+                                      py: "0 !important",
+                                      fontSize: "0.78125rem",
+                                      fontFamily: MONOSPACE_FONT,
+                                    },
+                                  }}
+                                />
+                              )}
+                            />
+                          ) : (
+                            <Tooltip title={override ? `模型覆盖：${override}` : `继承提供商：${inherited}`}>
+                              <Box
+                                component="span"
+                                sx={{ color: override ? "text.primary" : "text.disabled" }}
+                              >
+                                {displayNpm(shown)}
+                              </Box>
+                            </Tooltip>
+                          )}
                         </TableCell>
                       );
                     })()}

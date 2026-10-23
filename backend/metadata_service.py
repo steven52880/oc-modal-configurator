@@ -467,8 +467,17 @@ def _defaults(entry: CatalogEntry, model_key: str, provider_hint: str | None, ki
         "meta": meta,
         "interleaved": normalize_interleaved(raw.get("interleaved")) if "interleaved" in raw else None,
         "reasoningEffortValues": list(variants.keys()),
+        "reasoningTypes": _reasoning_types(raw.get("reasoning_options")),
         "catalogNpm": entry.provider.get("npm"),
     }
+
+
+def _reasoning_types(options: object) -> list[str]:
+    """models.dev reasoning_options 中出现的类型，例如 effort / toggle / budget_tokens。"""
+    if not isinstance(options, list):
+        return []
+    found = {item.get("type") for item in options if isinstance(item, dict)}
+    return sorted(item for item in found if isinstance(item, str))
 
 
 def _compact(entry: CatalogEntry) -> dict:
@@ -496,6 +505,7 @@ def _not_found(model_key: str, provider_hint: str | None) -> dict:
         "meta": {},
         "interleaved": None,
         "reasoningEffortValues": [],
+        "reasoningTypes": [],
         "catalogNpm": None,
     }
 

@@ -137,14 +137,23 @@ def _merge(data: dict) -> dict:
     return settings
 
 
+# Windows 最小化窗口的坐标是 -32000（按 DPI 缩放后如 150% 为 -21333），
+# 在最小化状态下记下的位置会让下次启动的窗口开在屏幕外，这类坐标一律丢弃
+MINIMIZED_COORD_LIMIT = -10000
+
+
 def _window(value: dict) -> dict:
     width = _positive_int(value.get("width"), 1440)
     height = _positive_int(value.get("height"), 900)
+    x = _optional_int(value.get("x"))
+    y = _optional_int(value.get("y"))
+    if x is None or y is None or x <= MINIMIZED_COORD_LIMIT or y <= MINIMIZED_COORD_LIMIT:
+        x = y = None
     return {
         "width": width,
         "height": height,
-        "x": _optional_int(value.get("x")),
-        "y": _optional_int(value.get("y")),
+        "x": x,
+        "y": y,
     }
 
 

@@ -166,3 +166,69 @@ Gemini 的推理通过 `generationConfig.thinkingConfig` 控制：
 - GPT 推理模型：优先 Responses，前提是中转实现了 `/v1/responses`。
 - Claude：用 Anthropic，才能完整使用 thinking 签名、`cache_control` 和 PDF 输入。
 - Gemini：用原生格式，才能使用视频与音频输入、`thoughtSignature` 和搜索溯源。
+
+## 10. opencode 配置中的推理参数
+
+本节是本工具「生成参数」功能（`backend/param_templates.py`）的依据。源码基线为 opencode v1.19.3（`provider.ts`、`transform.ts`、`packages/ai/src/protocols/*`），厂商行为以 DeepSeek、Kimi 官方文档为准。
+
+### 10.1 配置如何变成请求
+
+`variants` / `options` 里写的不是 HTTP 字段，而是 AI SDK 协议包的 providerOptions（camelCase）。协议包再翻译成接口字段：
+
+| 协议 (npm) | 配置里写 | 实际请求体 |
+|---|---|---|
+| `@ai-sdk/openai-compatible` | `reasoningEffort: "high"` | `reasoning_effort: "high"` |
+| `@ai-sdk/openai-compatible` | `thinking: {type: "disabled"}`（协议包不认识的键） | 原样透传：`thinking: {type: "disabled"}` |
+| `@ai-sdk/openai` | `reasoningEffort`、`reasoningSummary`、`include` | Responses 的 `reasoning.effort`、`reasoning.summary`、`include` |
+| `@ai-sdk/anthropic` | `effort: "high"` | `output_config: {effort: "high"}` |
+| `@ai-sdk/anthropic` | `thinking: {type, budgetTokens}` | `thinking: {type, budget_tokens}` |
+| `@ai-sdk/google` | `thinkingConfig: {thinkingLevel, includeThoughts}` | `generationConfig.thinkingConfig` |
+
+所以 openai 兼容协议下写 `reasoningEffort` 是对的，直接写 `reasoning_effort` 反而不保证生效。
+
+配置里的变体不会替换 opencode 内置变体，而是逐档深度合并（`mergeDeep`）：
+
+- 内置有、配置没写的档仍然存在。例如 openai 兼容协议下 DeepSeek V4 内置有 `low/medium/high/max`，配置只写 `low/high/max` 时 `medium` 仍会出现。
+- 配置写成空 `{}` 的档，内容完全来自内置变体；内置没有这一档时，选它等于什么都不发。
+- 某档写 `{"disabled": true}` 可以隐藏它。
+### 10.2 生成器的规则
+
+强度档位、`interleaved`、`temperature` 全部来自 models.dev 匹配结果，工具不维护厂商表，只维护一张「协议 → 变体体」翻译表：
+
+| 协议 | 每个强度档生成 |
+|---|---|
+| `@ai-sdk/openai-compatible` / `@ai-sdk/openai` / `@ai-sdk/xai` | `{reasoningEffort: <档>}` |
+| `@ai-sdk/anthropic` | `{effort: <档>}` |
+| `@ai-sdk/google` | `{thinkingConfig: {thinkingLevel: <档>}}` |
+
+其它规则：
+
+- 模型库 `reasoning: false`：清空变体。
+- 只有 `budget_tokens`（如 Claude Sonnet 4.5、Haiku 4.5）：不改变体，使用 opencode 内置的 `high`/`max` 预算档。
+- openai 兼容协议且模型库标了 `toggle`：额外生成关闭思考档 `none: {thinking: {type: "disabled"}}`，放在最前；模型库已有 `none` 档时不覆盖。其它协议只有 `toggle` 时不改变体。
+- `interleaved` 只在 openai 兼容协议下写入，切到其它协议时删除。
+- 未匹配到模型库：完全不改动。
+
+### 10.3 各厂商要点
+
+| 厂商 / 模型 | openai 兼容协议 | anthropic 协议 | 备注 |
+|---|---|---|---|
+| DeepSeek V4 | `thinking.type` 开关 + `reasoning_effort: low/high/max`，默认开启、`high` | `output_config.effort` | 传入 `medium` 映射为 `high`，`xhigh` 映射为 `high`。思考模式下 `temperature` 等采样参数不生效但不报错 |
+| Kimi K3 | `reasoning_effort: low/high/max`，默认 `max` | `effort` | 始终思考，不能关；不支持 `thinking` 参数 |
+| Kimi K2.6 | 只有 `thinking.type` 开关，默认开启 | 同左 | 不能调强度；多轮保留思考需 `thinking.keep: "all"`（写在 options，不是变体） |
+| Kimi K2.7 Code | 始终思考，传 `disabled` 报错 | 同左 | 不生成任何变体 |
+| GLM-5.x | `reasoning_effort`；`thinking.type` 开关 | `effort` | GLM-5.3 关闭思考返回 400，模型库也未标 `toggle` |
+| Claude 4.6+ | — | 内置 `thinking: adaptive` + `effort` | 工具生成 `{effort}` 与内置一致 |
+| Claude 4.5 及以前 | — | 内置 `thinking.budgetTokens` | 只有预算，没有强度 |
+
+Kimi 和 DeepSeek 的温度都是固定值，模型库标 `temperature: false`，生成器会写入。
+
+### 10.4 边角情况
+
+- **anthropic 协议下的非 Claude 模型**：opencode 只给 Claude 4.6+ 和 Kimi 内置带 `effort` 的变体，其它模型（DeepSeek、GLM 等）内置只有 `high`/`max` 两个 `thinking.budgetTokens` 档。因此工具必须显式写 `{effort}`，空 `{}` 会导致 `low` 档什么都不发。合并后 `high`/`max` 同时带 `effort` 和 `budget_tokens`，服务端是否忽略预算未经验证。
+- **关闭思考写法不统一**：生成器统一写 `thinking.type: "disabled"`，适用于 DeepSeek、Kimi K2.6、GLM、MiniMax。千问 DashScope 用 `enable_thinking: false`，vLLM / SGLang 自部署通常用 `chat_template_kwargs`，这些需要手动把 `none` 档改成对应写法。
+- **中转是否透传**：`thinking` 是非标准参数，中转（如 NewAPI）可能丢弃，需实际请求确认。
+- **DeepSeek 的 `reasoning_content` 回传**：带工具的会话必须回传所有历史 `reasoning_content`，否则 400。opencode 对 openai 兼容协议下 ID 含 `deepseek` 的模型自动补 `interleaved: reasoning_content`，并给每条 assistant 消息补空推理，所以模型库条目缺这个字段也不影响。同一会话中在思考和不思考之间切换是否报错，未经验证。
+- **模型库匹配到第三方条目**：官方条目找不到时会用第三方提供商的条目，档位可能不准。例如 `claude-opus-4-1` 匹配到 requesty，生成了 Anthropic 不支持的 `none` 档。点号写法的 ID（如 `claude-sonnet-4.5`）可能匹配不到，此时不改动。
+- **切换协议后的残留**：只有开关或预算的模型，在非 openai 兼容协议下不改变体，从别的协议切过来时旧的 `{reasoningEffort}` 档会留着且无效，需手动删除。
+- **openai 协议的非内置档**：opencode 内置的 GPT 变体带 `reasoningSummary: "auto"` 和加密推理 `include`，但只覆盖内置档位；模型库新增、opencode 未内置的档（如 `max`）只有工具写的 `reasoningEffort`，拿不到推理摘要和加密推理回传。

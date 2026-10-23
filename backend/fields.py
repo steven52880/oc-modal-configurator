@@ -18,12 +18,15 @@ COST_KEYS = ("input", "output", "cache_read", "cache_write")
 META_KEYS = (
     "family",
     "release_date",
+    "status",
+)
+# models.dev 元数据中不属于 opencode schema 的字段：读取时丢弃，不再写回
+DROPPED_META_KEYS = (
     "last_updated",
     "knowledge",
     "open_weights",
     "canonical_model_id",
     "description",
-    "status",
 )
 VARIANT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 OFFICIAL_PROVIDER_IDS = frozenset({"openai", "deepseek", "anthropic", "google"})

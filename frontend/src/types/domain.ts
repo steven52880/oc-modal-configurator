@@ -18,6 +18,17 @@ export const MODEL_COLUMN_IDS = [
   "inputModalities",
   "outputModalities",
   "variants",
+  "npm",
+] as const;
+/** opencode 未配置 npm 时使用的默认驱动包 */
+export const DEFAULT_NPM = "@ai-sdk/openai-compatible";
+/** 模型级「协议」可选项（空字符串 = 继承提供商） */
+export const MODEL_NPM_OPTIONS = [
+  "@ai-sdk/anthropic",
+  "@ai-sdk/openai",
+  "@ai-sdk/openai-compatible",
+  "@ai-sdk/google",
+  "@ai-sdk/xai",
 ] as const;
 
 /** File mtime in nanoseconds. Keep it as a string; a JS number cannot hold it. */
@@ -99,11 +110,6 @@ export interface ModelProviderOverride {
 export interface ModelMeta {
   family: string | null;
   release_date: string | null;
-  last_updated: string | null;
-  knowledge: string | null;
-  open_weights: boolean | null;
-  canonical_model_id: string | null;
-  description: string | null;
   status: string | null;
 }
 
@@ -219,6 +225,27 @@ export interface ModelDefaults {
   interleaved: boolean | string | null;
   reasoningEffortValues: string[];
   catalogNpm: string | null;
+}
+
+/** backend/param_templates.py 的生成结果；null 表示不改动，remove 列出需删除的字段 */
+export interface ModelParamResult {
+  modelKey: string;
+  npm: string;
+  status: "ok" | "unmatched" | "unsupported_npm";
+  matchedProviderId: string | null;
+  matchedModelId: string | null;
+  variants: Record<string, Record<string, unknown>> | null;
+  interleaved: boolean | string | null;
+  temperature: boolean | null;
+  remove: Array<"interleaved">;
+  notes: string[];
+}
+
+export interface ModelParamRequest {
+  modelKey: string;
+  modelId?: string | null;
+  providerHint?: string | null;
+  npm?: string | null;
 }
 
 export interface CatalogModel extends ModelDefaults {

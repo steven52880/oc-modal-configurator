@@ -34,6 +34,8 @@ interface EditDialogProps {
   onClose: () => void;
   onSaveProviders: (updated: ProviderEntry[]) => void;
   onSaveModels: (updated: ModelEntry[]) => void;
+  /** 模型所属提供商的 npm，用于显示「继承」提示 */
+  modelProviderNpm?: string | null;
 }
 
 export const EditDialog: React.FC<EditDialogProps> = ({
@@ -41,6 +43,7 @@ export const EditDialog: React.FC<EditDialogProps> = ({
   onClose,
   onSaveProviders,
   onSaveModels,
+  modelProviderNpm = null,
 }) => {
   if (!state || state.targets.length === 0) return null;
 
@@ -96,6 +99,7 @@ export const EditDialog: React.FC<EditDialogProps> = ({
           <ModelEditSection
             targets={state.targets}
             providerKey={state.providerKey}
+            providerNpm={modelProviderNpm}
             existingKeys={state.existingKeys}
             isBatch={state.isBatch}
             onSave={onSaveModels}

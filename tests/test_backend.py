@@ -10,8 +10,9 @@ from backend.bridge import Bridge
 from backend.ccswitch_service import CcSwitchService
 from backend.errors import ServiceError
 from backend.config_service import ConfigService, document_from_raw, to_raw
-from backend.fields import model_prefix
+from backend.fields import DROPPED_META_KEYS, model_prefix
 from backend.metadata_service import MetadataService
+from backend.param_templates import generate
 from backend.paths import PROJECT_ROOT, catalog_cache_path
 from backend.provider_probe import models_url, parse_models_payload
 from backend.secrets import describe_api_key, resolve_secret
@@ -101,6 +102,42 @@ class ConfigTests(unittest.TestCase):
             forced = service.save(document, force=True)
             self.assertTrue(forced["backupPath"].endswith(".bak"))
 
+    def test_non_schema_meta_keys_are_dropped(self):
+        raw = {
+            "provider": {
+                "p": {
+                    "models": {
+                        "m": {
+                            "family": "fam",
+                            "release_date": "2025-01-01",
+                            "status": "beta",
+                            "last_updated": "2025-02-01",
+                            "knowledge": "2024-10",
+                            "open_weights": False,
+                            "canonical_model_id": "x/y",
+                            "description": "desc",
+                        }
+                    }
+                }
+            }
+        }
+        document = document_from_raw(raw, Path("demo.json"), True, 1)
+        model = document["providers"][0]["models"][0]
+        self.assertEqual(model["extra"], {})
+        self.assertEqual(
+            to_raw(document)["provider"]["p"]["models"]["m"],
+            {"family": "fam", "release_date": "2025-01-01", "status": "beta"},
+        )
+
+    def test_model_provider_npm_round_trip_and_empty_omitted(self):
+        raw = {"provider": {"p": {"models": {"m": {"provider": {"npm": "@ai-sdk/anthropic"}}}}}}
+        document = document_from_raw(raw, Path("demo.json"), True, 1)
+        model = document["providers"][0]["models"][0]
+        self.assertEqual(model["provider"]["npm"], "@ai-sdk/anthropic")
+        self.assertEqual(to_raw(document), raw)
+        model["provider"]["npm"] = ""
+        self.assertEqual(to_raw(document)["provider"]["p"]["models"]["m"], {})
+
     def test_duplicate_provider_key_is_rejected(self):
         document = document_from_raw({}, Path("new.json"), False, None)
         document["providers"] = [
@@ -117,7 +154,12 @@ class ConfigTests(unittest.TestCase):
         raw = json.loads(USER_CONFIG.read_text(encoding="utf-8-sig"))
         document = document_from_raw(raw, USER_CONFIG, True, 1)
         produced = to_raw(document)
-        self.assertEqual(redact(produced), redact(raw))
+        expected = json.loads(json.dumps(raw))
+        for provider in (expected.get("provider") or {}).values():
+            for model in (provider.get("models") or {}).values():
+                for key in DROPPED_META_KEYS:
+                    model.pop(key, None)
+        self.assertEqual(redact(produced), redact(expected))
         self.assertEqual(
             produced["provider"][next(iter(raw["provider"]))]["options"]["apiKey"],
             raw["provider"][next(iter(raw["provider"]))]["options"]["apiKey"],
@@ -137,6 +179,16 @@ class SettingsTests(unittest.TestCase):
             restored = store.load()
             self.assertEqual(restored["splitRatio"], 0.4)
             self.assertTrue(any(item.name.startswith("settings.json.bad") for item in path.parent.iterdir()))
+
+    def test_minimized_window_position_is_discarded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "settings.json")
+            saved = store.update({"window": {"width": 1298, "height": 818, "x": -21332, "y": -21332}})
+            self.assertIsNone(saved["window"]["x"])
+            self.assertIsNone(saved["window"]["y"])
+            self.assertEqual(saved["window"]["width"], 1298)
+            kept = store.update({"window": {"x": -1200, "y": 40}})
+            self.assertEqual((kept["window"]["x"], kept["window"]["y"]), (-1200, 40))
 
     def test_runtime_cache_is_outside_the_repository(self):
         previous = os.environ.pop("OC_APP_CONFIG_DIR", None)
@@ -551,6 +603,203 @@ MINI_CATALOG = {
         },
     },
 }
+
+
+PARAM_CATALOG = {
+    "anthropic": {
+        "id": "anthropic",
+        "npm": "@ai-sdk/anthropic",
+        "models": {
+            "claude-opus-5-5": {
+                "id": "claude-opus-5-5",
+                "reasoning": True,
+                "temperature": False,
+                "limit": {"context": 200000, "output": 64000},
+                "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]}],
+            }
+        },
+    },
+    "openai": {
+        "id": "openai",
+        "npm": "@ai-sdk/openai",
+        "models": {
+            "gpt-5.6-sol": {
+                "id": "gpt-5.6-sol",
+                "reasoning": True,
+                "temperature": False,
+                "limit": {"context": 400000, "output": 128000},
+                "reasoning_options": [
+                    {"type": "effort", "values": ["none", "low", "medium", "high", "xhigh", "max"]}
+                ],
+            },
+            "gpt-plain": {
+                "id": "gpt-plain",
+                "reasoning": False,
+                "temperature": True,
+                "limit": {"context": 128000, "output": 16000},
+            },
+        },
+    },
+    "moonshotai": {
+        "id": "moonshotai",
+        "npm": "@ai-sdk/openai-compatible",
+        "models": {
+            "kimi-k3": {
+                "id": "kimi-k3",
+                "reasoning": True,
+                "temperature": False,
+                "interleaved": {"field": "reasoning_content"},
+                "limit": {"context": 262144, "output": 32768},
+                "reasoning_options": [{"type": "effort", "values": ["low", "high", "max"]}],
+            }
+        },
+    },
+    "google": {
+        "id": "google",
+        "npm": "@ai-sdk/google",
+        "models": {
+            "gemini-3.8-flash": {
+                "id": "gemini-3.8-flash",
+                "reasoning": True,
+                "temperature": True,
+                "limit": {"context": 1048576, "output": 65536},
+                "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}],
+            }
+        },
+    },
+    "zhipuai": {
+        "id": "zhipuai",
+        "npm": "@ai-sdk/openai-compatible",
+        "models": {
+            "glm-4.6": {
+                "id": "glm-4.6",
+                "reasoning": True,
+                "temperature": True,
+                "interleaved": {"field": "reasoning_content"},
+                "limit": {"context": 204800, "output": 131072},
+                "reasoning_options": [{"type": "toggle"}],
+            }
+        },
+    },
+    "deepseek": {
+        "id": "deepseek",
+        "npm": "@ai-sdk/openai-compatible",
+        "models": {
+            "deepseek-v4-pro": {
+                "id": "deepseek-v4-pro",
+                "reasoning": True,
+                "temperature": True,
+                "interleaved": {"field": "reasoning_content"},
+                "limit": {"context": 1048576, "output": 65536},
+                "reasoning_options": [{"type": "toggle"}, {"type": "effort", "values": ["low", "high", "max"]}],
+            }
+        },
+    },
+}
+
+
+class ParamTemplateTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        root = Path(self.directory.name)
+        cache = root / "api.json"
+        cache.write_text(json.dumps(PARAM_CATALOG), encoding="utf-8")
+        self.service = MetadataService(cache, root / "api.meta.json")
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def gen(self, key, npm, hint=None):
+        result = generate(self.service, {"modelKey": key, "npm": npm, "providerHint": hint})
+        self.assertNotIn("options", result)
+        return result
+
+    def test_claude_on_anthropic(self):
+        result = self.gen("claude-opus-5-5", "@ai-sdk/anthropic")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["variants"],
+            {effort: {"effort": effort} for effort in ("low", "medium", "high", "xhigh", "max")},
+        )
+        self.assertIsNone(result["interleaved"])
+        self.assertIn("interleaved", result["remove"])
+        self.assertIs(result["temperature"], False)
+
+    def test_gpt_on_openai(self):
+        result = self.gen("gpt-5.6-sol", "@ai-sdk/openai")
+        self.assertEqual(list(result["variants"]), ["none", "low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(result["variants"]["none"], {"reasoningEffort": "none"})
+        self.assertIs(result["temperature"], False)
+
+    def test_kimi_on_openai_compatible_and_on_anthropic(self):
+        result = self.gen("kimi-k3", "@ai-sdk/openai-compatible")
+        self.assertEqual(
+            result["variants"],
+            {
+                "low": {"reasoningEffort": "low"},
+                "high": {"reasoningEffort": "high"},
+                "max": {"reasoningEffort": "max"},
+            },
+        )
+        self.assertEqual(result["interleaved"], "reasoning_content")
+        self.assertEqual(result["remove"], [])
+        switched = self.gen("kimi-k3", "@ai-sdk/anthropic")
+        self.assertIsNone(switched["interleaved"])
+        self.assertIn("interleaved", switched["remove"])
+        self.assertEqual(
+            switched["variants"],
+            {"low": {"effort": "low"}, "high": {"effort": "high"}, "max": {"effort": "max"}},
+        )
+
+    def test_gemini_on_google(self):
+        result = self.gen("gemini-3.8-flash", "@ai-sdk/google")
+        self.assertEqual(result["variants"]["medium"], {"thinkingConfig": {"thinkingLevel": "medium"}})
+        self.assertIs(result["temperature"], True)
+
+    def test_toggle_only_gets_thinking_off_variant_on_compatible(self):
+        result = self.gen("glm-4.6", "@ai-sdk/openai-compatible")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["variants"], {"none": {"thinking": {"type": "disabled"}}})
+        self.assertEqual(result["interleaved"], "reasoning_content")
+        # 其它协议不翻译开关，保持原样
+        other = self.gen("glm-4.6", "@ai-sdk/anthropic")
+        self.assertIsNone(other["variants"])
+        self.assertIn("仅支持开关/预算，未生成变体", other["notes"])
+
+    def test_toggle_with_effort_puts_none_first(self):
+        result = self.gen("deepseek-v4-pro", "@ai-sdk/openai-compatible")
+        self.assertEqual(list(result["variants"]), ["none", "low", "high", "max"])
+        self.assertEqual(result["variants"]["none"], {"thinking": {"type": "disabled"}})
+        self.assertEqual(result["variants"]["high"], {"reasoningEffort": "high"})
+        # 模型库自带 none 档时不覆盖
+        kimi = self.gen("kimi-k3", "@ai-sdk/openai-compatible")
+        self.assertNotIn("none", kimi["variants"])
+
+    def test_non_reasoning_model_clears_variants(self):
+        result = self.gen("gpt-plain", "@ai-sdk/openai")
+        self.assertEqual(result["variants"], {})
+        self.assertIs(result["temperature"], True)
+
+    def test_unknown_npm_and_unmatched(self):
+        unknown = self.gen("kimi-k3", "@openrouter/ai-sdk-provider")
+        self.assertEqual(unknown["status"], "unsupported_npm")
+        self.assertIsNone(unknown["variants"])
+        self.assertTrue(unknown["notes"])
+        missing = self.gen("no-such-model", "@ai-sdk/openai")
+        self.assertEqual(missing["status"], "unmatched")
+        self.assertIsNone(missing["variants"])
+        self.assertIsNone(missing["interleaved"])
+        self.assertIsNone(missing["temperature"])
+        self.assertEqual(missing["remove"], [])
+
+    def test_default_npm_and_bridge(self):
+        result = self.gen("kimi-k3", None)
+        self.assertEqual(result["npm"], "@ai-sdk/openai-compatible")
+        root = Path(self.directory.name)
+        bridge = Bridge(ConfigService(root / "o.json"), self.service, SettingsStore(root / "s.json"))
+        envelope = bridge.generate_model_params([{"modelKey": "kimi-k3", "npm": "@ai-sdk/xai"}])
+        self.assertTrue(envelope["ok"])
+        self.assertEqual(envelope["data"][0]["variants"]["low"], {"reasoningEffort": "low"})
 
 
 if __name__ == "__main__":

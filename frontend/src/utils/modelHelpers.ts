@@ -1,6 +1,9 @@
 import {
+  DEFAULT_NPM,
   MODALITIES,
+  MODEL_NPM_OPTIONS,
   VARIANT_ORDER,
+  type ModelParamResult,
   type CatalogModel,
   type ModelDefaults,
   type ModelEntry,
@@ -9,6 +12,22 @@ import {
 } from "../types/domain";
 
 export const MIXED_PLACEHOLDER = "<...>";
+
+const AI_SDK_SCOPE = "@ai-sdk/";
+
+/** 显示用：去掉 "@ai-sdk/" 前缀，其它包名原样返回 */
+export function displayNpm(npm: string | null | undefined): string {
+  const text = (npm ?? "").trim();
+  return text.startsWith(AI_SDK_SCOPE) ? text.slice(AI_SDK_SCOPE.length) : text;
+}
+
+/** 输入/粘贴用：已知短名（如 "anthropic"）补全为 "@ai-sdk/<name>"，否则原样保留 */
+export function normalizeNpmInput(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  const known = MODEL_NPM_OPTIONS.find((full) => displayNpm(full) === trimmed.toLowerCase());
+  return known ?? trimmed;
+}
 
 const PREFIX_PALETTE: Array<{ bg: string; fg: string; border: string }> = [
   { bg: "#e0f2fe", fg: "#0369a1", border: "#bae6fd" },
@@ -188,11 +207,6 @@ export function createEmptyMeta(partial?: Partial<ModelMeta> | null): ModelMeta 
   return {
     family: partial?.family ?? null,
     release_date: partial?.release_date ?? null,
-    last_updated: partial?.last_updated ?? null,
-    knowledge: partial?.knowledge ?? null,
-    open_weights: partial?.open_weights ?? null,
-    canonical_model_id: partial?.canonical_model_id ?? null,
-    description: partial?.description ?? null,
     status: partial?.status ?? null,
   };
 }
@@ -452,6 +466,76 @@ export const VARIANT_META: Record<
   high: { shortLabel: "HIGH", tooltip: "high (高强度推理)" },
   xhigh: { shortLabel: "XHIGH", tooltip: "xhigh (超高强度推理)" },
   max: { shortLabel: "MAX", tooltip: "max (最大强度推理)" },
+};
+
+// ---------------------------------------------------------------------------
+// 参数模板（backend/param_templates.py）应用与比较：纯函数，无副作用
+// 受管字段只有 variants / interleaved / temperature，绝不触碰 options
+// ---------------------------------------------------------------------------
+
+export type ManagedField = "variants" | "interleaved" | "temperature";
+export const MANAGED_FIELDS: readonly ManagedField[] = ["variants", "interleaved", "temperature"];
+
+/** 生效协议：模型覆盖 > 提供商 npm > opencode 默认 */
+export function effectiveNpm(model: ModelEntry, providerNpm: string | null | undefined): string {
+  return model.provider?.npm?.trim() || providerNpm?.trim() || DEFAULT_NPM;
+}
+
+/** 把生成结果套到模型上：null = 不改动，remove 中的字段清空 */
+export function applyParamResult(model: ModelEntry, result: ModelParamResult): ModelEntry {
+  if (result.status === "unmatched") return model;
+  const next: ModelEntry = { ...model };
+  if (result.variants !== null) {
+    const variants: Record<string, Record<string, unknown>> = {};
+    for (const [key, body] of Object.entries(result.variants)) {
+      variants[key] = { ...body };
+    }
+    next.variants = variants;
+  }
+  if (result.interleaved !== null) next.interleaved = result.interleaved;
+  if (result.remove.includes("interleaved")) next.interleaved = null;
+  if (result.temperature !== null) next.temperature = result.temperature;
+  return next;
+}
+
+/** 键顺序无关的稳定序列化，用于深比较 */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function managedValue(model: ModelEntry, field: ManagedField): unknown {
+  if (field === "variants") return model.variants ?? {};
+  if (field === "interleaved") return model.interleaved ?? null;
+  return model.temperature ?? null;
+}
+
+/** 返回 a、b 之间取值不同的受管字段 */
+export function diffManagedFields(a: ModelEntry, b: ModelEntry): ManagedField[] {
+  return MANAGED_FIELDS.filter(
+    (field) => stableStringify(managedValue(a, field)) !== stableStringify(managedValue(b, field)),
+  );
+}
+
+/**
+ * 判断模型当前受管字段是否「仍是旧模板的产物」：把旧协议下的生成结果套到模型上，
+ * 若受管字段不变，说明用户没手改过，可以静默重新生成。
+ */
+export function matchesParamTemplate(model: ModelEntry, oldResult: ModelParamResult): boolean {
+  if (oldResult.status === "unmatched") return false;
+  return diffManagedFields(model, applyParamResult(model, oldResult)).length === 0;
+}
+
+export const MANAGED_FIELD_LABELS: Record<ManagedField, string> = {
+  variants: "变体",
+  interleaved: "交错思考",
+  temperature: "温度",
 };
 
 export function splitCatalogPath(fullPath: string | null | undefined): {

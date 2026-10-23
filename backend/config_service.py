@@ -7,6 +7,7 @@ from backend.errors import ServiceError
 from backend.fields import (
     CAPABILITY_KEYS,
     COST_KEYS,
+    DROPPED_META_KEYS,
     LIMIT_KEYS,
     META_KEYS,
     PROVIDER_OPTION_KEYS,
@@ -159,6 +160,7 @@ def _normalize_model(key: str, value: object) -> dict:
         "headers",
         "provider",
         *META_KEYS,
+        *DROPPED_META_KEYS,
     }
     modalities = value.get("modalities") if "modalities" in value else None
     if modalities is not None and not isinstance(modalities, dict):
@@ -297,6 +299,8 @@ def _provider_options_to_raw(provider: dict) -> dict:
 
 def _model_to_raw(model: dict) -> dict:
     raw = _object(model.get("extra"), "模型 extra")
+    for key in DROPPED_META_KEYS:
+        raw.pop(key, None)
     _put_text(raw, "name", model.get("name"))
     _put_text(raw, "id", model.get("id"))
     for key in CAPABILITY_KEYS:

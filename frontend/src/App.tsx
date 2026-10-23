@@ -32,6 +32,8 @@ import type {
   ConfigSource,
   MetadataStatus,
   ModelEntry,
+  ModelParamRequest,
+  ModelParamResult,
   PROVIDER_COLUMN_IDS,
   ProviderEntry,
   Settings,
@@ -45,6 +47,13 @@ import {
   applyVariantsFromCell,
   createEmptyModel,
   createEmptyProvider,
+  diffManagedFields,
+  effectiveNpm,
+  MANAGED_FIELD_LABELS,
+  matchesParamTemplate,
+  normalizeNpmInput,
+  applyParamResult,
+  type ManagedField,
   parseModalitiesFromCell,
   splitCatalogPath,
   toggleKnownModality,
@@ -53,6 +62,14 @@ import {
 import { MONOSPACE_FONT } from "./theme";
 
 type ProviderColumnId = (typeof PROVIDER_COLUMN_IDS)[number];
+
+/** 一次参数生成任务：oldNpm 仅在协议变更（smart 模式）时用于判断是否手改过 */
+interface ParamJob {
+  key: string;
+  modelId: string | null;
+  oldNpm: string;
+  newNpm: string;
+}
 
 function formatUpdatedAt(iso: string | null | undefined): string {
   if (!iso) return "未知时间";
@@ -105,21 +122,37 @@ export const App: React.FC = () => {
   const [editDialogState, setEditDialogState] = useState<EditDialogState>(null);
   const [addModelsOpen, setAddModelsOpen] = useState<boolean>(false);
 
-  // Status banner / toast
+  // Status banner / toast（action 用于「撤销」等单步操作）
   const [toast, setToast] = useState<{
     message: string;
     severity: "info" | "warning" | "error" | "success";
+    action?: { label: string; onClick: () => void };
   } | null>(null);
 
   const notify = useCallback(
     (
       message: string,
       severity: "info" | "warning" | "error" | "success" = "info",
+      action?: { label: string; onClick: () => void },
     ) => {
-      setToast({ message, severity });
+      setToast({ message, severity, action });
     },
     [],
   );
+
+  // 参数生成：进行中标记 + 手改行的覆盖确认
+  const [generatingParams, setGeneratingParams] = useState<boolean>(false);
+  const [paramConfirm, setParamConfirm] = useState<{
+    providerKey: string;
+    /** 手动修改过受管字段的行：等待用户选择「覆盖」或「跳过」 */
+    rows: Array<{ key: string; fields: ManagedField[]; result: ModelParamResult; before: ModelEntry }>;
+    /** 本批已静默应用的行在生成前的快照，覆盖后合并进同一次撤销 */
+    snapshot: Map<string, ModelEntry>;
+    applied: number;
+    extras: string[];
+  } | null>(null);
+  const documentRef = useRef<ConfigDocument | null>(documentData);
+  documentRef.current = documentData;
 
   // Shared success handling for both sources
   const applyLoadedDocument = useCallback((doc: ConfigDocument) => {
@@ -241,6 +274,181 @@ export const App: React.FC = () => {
     if (!documentData || !selectedProviderKey) return null;
     return documentData.providers.find((p) => p.key === selectedProviderKey) ?? null;
   }, [documentData, selectedProviderKey]);
+
+  // ---------------------------------------------------------------------------
+  // 参数生成（backend/param_templates.py）：受管字段 variants / interleaved / temperature
+  // ---------------------------------------------------------------------------
+
+  /** 把生成结果套到指定提供商下的模型（基于最新 state，保留期间的其它修改） */
+  const applyParamResults = useCallback(
+    (providerKey: string, results: Map<string, ModelParamResult>) => {
+      if (results.size === 0) return;
+      setDocumentData((prev) =>
+        prev
+          ? {
+              ...prev,
+              providers: prev.providers.map((p) =>
+                p.key !== providerKey
+                  ? p
+                  : {
+                      ...p,
+                      models: p.models.map((m) => {
+                        const r = results.get(m.key);
+                        return r ? applyParamResult(m, r) : m;
+                      }),
+                    },
+              ),
+            }
+          : null,
+      );
+      setDirty(true);
+    },
+    [],
+  );
+
+  /** 撤销：只恢复受管字段，协议修改等其它改动保持不变 */
+  const restoreManagedFields = useCallback(
+    (providerKey: string, snapshot: Map<string, ModelEntry>) => {
+      setDocumentData((prev) =>
+        prev
+          ? {
+              ...prev,
+              providers: prev.providers.map((p) =>
+                p.key !== providerKey
+                  ? p
+                  : {
+                      ...p,
+                      models: p.models.map((m) => {
+                        const s = snapshot.get(m.key);
+                        return s
+                          ? { ...m, variants: s.variants, interleaved: s.interleaved, temperature: s.temperature }
+                          : m;
+                      }),
+                    },
+              ),
+            }
+          : null,
+      );
+      setDirty(true);
+    },
+    [],
+  );
+
+  const finishParamRun = useCallback(
+    (providerKey: string, snapshot: Map<string, ModelEntry>, applied: number, extras: string[]) => {
+      const parts = applied > 0 ? [`已为 ${applied} 个模型生成参数`, ...extras] : extras;
+      if (parts.length === 0) return;
+      notify(
+        parts.join("；"),
+        applied > 0 ? "success" : "warning",
+        applied > 0
+          ? {
+              label: "撤销",
+              onClick: () => {
+                restoreManagedFields(providerKey, snapshot);
+                notify("已撤销本次参数生成", "info");
+              },
+            }
+          : undefined,
+      );
+    },
+    [notify, restoreManagedFields],
+  );
+
+  /**
+   * 生成并应用参数。smart=true 用于协议变更：旧协议模板与当前受管字段一致的行静默重生成，
+   * 其余（用户手改过的）行汇总后弹一次确认框。smart=false 直接应用（添加模型、「生成参数」按钮）。
+   */
+  const runParamJobs = useCallback(
+    async (providerKey: string, jobs: ParamJob[], smart: boolean) => {
+      if (jobs.length === 0) return;
+      setGeneratingParams(true);
+      try {
+        const requests: ModelParamRequest[] = [];
+        for (const job of jobs) {
+          requests.push({ modelKey: job.key, modelId: job.modelId, providerHint: providerKey, npm: job.newNpm });
+          if (smart) {
+            requests.push({ modelKey: job.key, modelId: job.modelId, providerHint: providerKey, npm: job.oldNpm });
+          }
+        }
+        const results = await bridge.generateModelParams(requests);
+        const provider = documentRef.current?.providers.find((p) => p.key === providerKey);
+        if (!provider) return;
+        const modelMap = new Map(provider.models.map((m) => [m.key, m] as const));
+        const silent = new Map<string, ModelParamResult>();
+        const snapshot = new Map<string, ModelEntry>();
+        const handEdited: Array<{ key: string; fields: ManagedField[]; result: ModelParamResult; before: ModelEntry }> = [];
+        let unmatched = 0;
+        let unsupported = 0;
+        let unchanged = 0;
+        jobs.forEach((job, idx) => {
+          const next = results[smart ? idx * 2 : idx];
+          const old = smart ? results[idx * 2 + 1] : undefined;
+          const model = modelMap.get(job.key);
+          if (!model || !next) return;
+          if (next.status === "unmatched") {
+            unmatched += 1;
+            return;
+          }
+          if (next.status === "unsupported_npm") unsupported += 1;
+          const fields = diffManagedFields(model, applyParamResult(model, next));
+          if (fields.length === 0) {
+            unchanged += 1;
+            return;
+          }
+          if (!old || matchesParamTemplate(model, old)) {
+            silent.set(job.key, next);
+            snapshot.set(job.key, model);
+          } else {
+            handEdited.push({ key: job.key, fields, result: next, before: model });
+          }
+        });
+        const extras: string[] = [];
+        if (unmatched > 0) extras.push(`${unmatched} 个模型未匹配到模型库，未生成参数`);
+        if (unsupported > 0) extras.push(`${unsupported} 个模型的协议不在翻译表中，未生成变体`);
+        if (!smart && silent.size === 0 && unmatched === 0 && unchanged > 0) {
+          extras.push("所选模型的参数已与模型库一致");
+        }
+        applyParamResults(providerKey, silent);
+        if (handEdited.length > 0) {
+          setParamConfirm({ providerKey, rows: handEdited, snapshot, applied: silent.size, extras });
+        } else {
+          finishParamRun(providerKey, snapshot, silent.size, extras);
+        }
+      } catch (err) {
+        notify(err instanceof Error ? err.message : "生成参数失败", "error");
+      } finally {
+        setGeneratingParams(false);
+      }
+    },
+    [applyParamResults, finishParamRun, notify],
+  );
+
+  // 协议变更合并成一批（一次粘贴 / 一次弹窗保存），在当前事件结束后统一处理
+  const protocolQueueRef = useRef<{ providerKey: string; jobs: Map<string, ParamJob> } | null>(null);
+  const queueProtocolChange = useCallback(
+    (providerKey: string, job: ParamJob) => {
+      const queued = protocolQueueRef.current;
+      if (queued && queued.providerKey === providerKey) {
+        const existing = queued.jobs.get(job.key);
+        // 同一行多次变更：保留最早的旧协议，用于判断是否手改过
+        queued.jobs.set(job.key, existing ? { ...job, oldNpm: existing.oldNpm } : job);
+        return;
+      }
+      if (queued) void runParamJobs(queued.providerKey, [...queued.jobs.values()], true);
+      protocolQueueRef.current = { providerKey, jobs: new Map([[job.key, job]]) };
+      window.setTimeout(() => {
+        const current = protocolQueueRef.current;
+        protocolQueueRef.current = null;
+        if (current) {
+          // 新旧协议相同的行（改了又改回）无需处理
+          const jobs = [...current.jobs.values()].filter((j) => j.oldNpm !== j.newNpm);
+          void runParamJobs(current.providerKey, jobs, true);
+        }
+      }, 0);
+    },
+    [runParamJobs],
+  );
 
   // Switching provider clears model-row checks
   const handleSelectProvider = useCallback(
@@ -579,6 +787,46 @@ export const App: React.FC = () => {
         return { ok: true };
       }
 
+      if (columnId === "npm") {
+        // 空值 = 清除模型级覆盖，继承提供商 npm
+        const nextNpm = normalizeNpmInput(value) || null;
+        if ((targetModel.provider?.npm ?? null) === nextNpm) return { ok: true };
+        const oldEffective = effectiveNpm(targetModel, selectedProvider.npm);
+        const newEffective = effectiveNpm(
+          { ...targetModel, provider: { ...targetModel.provider, npm: nextNpm } },
+          selectedProvider.npm,
+        );
+        if (oldEffective !== newEffective) {
+          queueProtocolChange(selectedProvider.key, {
+            key: modelKey,
+            modelId: targetModel.id,
+            oldNpm: oldEffective,
+            newNpm: newEffective,
+          });
+        }
+        setDocumentData((prev) =>
+          prev
+            ? {
+                ...prev,
+                providers: prev.providers.map((p) =>
+                  p.key === selectedProvider.key
+                    ? {
+                        ...p,
+                        models: p.models.map((m) =>
+                          m.key === modelKey
+                            ? { ...m, provider: { ...m.provider, npm: nextNpm } }
+                            : m,
+                        ),
+                      }
+                    : p,
+                ),
+              }
+            : null,
+        );
+        setDirty(true);
+        return { ok: true };
+      }
+
       if (columnId === "context" || columnId === "output") {
         const trimmed = value.trim().replace(/,/g, "");
         let numVal: number | null = null;
@@ -679,7 +927,7 @@ export const App: React.FC = () => {
 
       return { ok: true };
     },
-    [documentData, selectedProvider],
+    [documentData, selectedProvider, queueProtocolChange],
   );
 
   const handleToggleModelModality = useCallback(
@@ -852,8 +1100,55 @@ export const App: React.FC = () => {
       );
       setDirty(true);
       notify(`已成功添加 ${filtered.length} 个模型`, "success");
+      // 新加入的模型自动按 models.dev × 协议生成参数
+      const providerNpm = selectedProvider.npm;
+      void runParamJobs(
+        selectedProvider.key,
+        filtered.map((m) => {
+          const npm = effectiveNpm(m, providerNpm);
+          return { key: m.key, modelId: m.id, oldNpm: npm, newNpm: npm };
+        }),
+        false,
+      );
     }
     setAddModelsOpen(false);
+  };
+
+  // 工具栏「生成参数」：对已勾选的行按当前协议直接重新生成
+  const handleGenerateParams = (keys: string[]) => {
+    if (!selectedProvider || keys.length === 0) return;
+    const keySet = new Set(keys);
+    void runParamJobs(
+      selectedProvider.key,
+      selectedProvider.models
+        .filter((m) => keySet.has(m.key))
+        .map((m) => {
+          const npm = effectiveNpm(m, selectedProvider.npm);
+          return { key: m.key, modelId: m.id, oldNpm: npm, newNpm: npm };
+        }),
+      false,
+    );
+  };
+
+  // 确认框：覆盖手改行，或跳过它们（协议修改本身已生效）
+  const resolveParamConfirm = (overwrite: boolean) => {
+    if (!paramConfirm) return;
+    const { providerKey, rows, snapshot, applied, extras } = paramConfirm;
+    setParamConfirm(null);
+    const merged = new Map(snapshot);
+    let total = applied;
+    if (overwrite) {
+      const results = new Map<string, ModelParamResult>();
+      for (const row of rows) {
+        results.set(row.key, row.result);
+        merged.set(row.key, row.before);
+      }
+      applyParamResults(providerKey, results);
+      total += rows.length;
+    } else {
+      extras.push(`已跳过 ${rows.length} 个手动修改过的模型`);
+    }
+    finishParamRun(providerKey, merged, total, extras);
   };
 
   const handleDeleteModels = (keysToDelete: string[]) => {
@@ -917,6 +1212,17 @@ export const App: React.FC = () => {
     if (!documentData || !editDialogState || editDialogState.kind !== "model") return;
     const provKey = editDialogState.providerKey;
     const originalKeys = editDialogState.targets.map((t) => t.key);
+    // 协议变更：对比弹窗前后的生效 npm，交给批处理智能重生成
+    const providerNpm = documentData.providers.find((p) => p.key === provKey)?.npm ?? null;
+    editDialogState.targets.forEach((before, idx) => {
+      const after = updatedList[idx];
+      if (!after) return;
+      const oldNpm = effectiveNpm(before, providerNpm);
+      const newNpm = effectiveNpm(after, providerNpm);
+      if (oldNpm !== newNpm) {
+        queueProtocolChange(provKey, { key: after.key, modelId: after.id, oldNpm, newNpm });
+      }
+    });
     const replacementMap = new Map<string, ModelEntry>();
     originalKeys.forEach((origKey, idx) => {
       if (updatedList[idx]) {
@@ -1554,6 +1860,8 @@ export const App: React.FC = () => {
               onToggleModelModality={handleToggleModelModality}
               onToggleModelVariant={handleToggleModelVariant}
               onApplySelectionDefaults={handleApplySelectionDefaults}
+              onGenerateParams={handleGenerateParams}
+              generatingParams={generatingParams}
               onAddBlankModel={handleAddBlankModel}
               onOpenAddModelsDialog={() => setAddModelsOpen(true)}
               onOpenSingleEdit={(modelKey) => {
@@ -1596,6 +1904,11 @@ export const App: React.FC = () => {
         onClose={() => setEditDialogState(null)}
         onSaveProviders={handleSaveProvidersFromDialog}
         onSaveModels={handleSaveModelsFromDialog}
+        modelProviderNpm={
+          editDialogState?.kind === "model"
+            ? documentData?.providers.find((p) => p.key === editDialogState.providerKey)?.npm ?? null
+            : null
+        }
       />
 
       {/* Add Models Dialog */}
@@ -1650,6 +1963,39 @@ export const App: React.FC = () => {
         </DialogActions>
       </Dialog>
 
+      {/* 参数重生成：手改行覆盖确认 */}
+      <Dialog
+        open={Boolean(paramConfirm)}
+        onClose={() => resolveParamConfirm(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>以下模型的参数已被手动修改</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ mb: 1.5, color: "text.secondary" }}>
+            协议修改已生效。按新协议重新生成参数会覆盖下列模型的这些字段：
+          </Typography>
+          <Stack spacing={0.75}>
+            {paramConfirm?.rows.map((row) => (
+              <Stack key={row.key} direction="row" spacing={1} alignItems="center">
+                <Typography variant="body2" sx={{ fontFamily: MONOSPACE_FONT }}>
+                  {row.key}
+                </Typography>
+                {row.fields.map((f) => (
+                  <Chip key={f} label={MANAGED_FIELD_LABELS[f]} size="small" />
+                ))}
+              </Stack>
+            ))}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => resolveParamConfirm(false)}>跳过这些行</Button>
+          <Button variant="contained" onClick={() => resolveParamConfirm(true)}>
+            覆盖
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Global Toast Notification */}
       <Snackbar
         open={Boolean(toast)}
@@ -1662,6 +2008,21 @@ export const App: React.FC = () => {
             severity={toast.severity}
             variant="filled"
             onClose={() => setToast(null)}
+            action={
+              toast.action ? (
+                <Button
+                  color="inherit"
+                  size="small"
+                  onClick={() => {
+                    const run = toast.action?.onClick;
+                    setToast(null);
+                    run?.();
+                  }}
+                >
+                  {toast.action.label}
+                </Button>
+              ) : undefined
+            }
             sx={{ width: "100%" }}
           >
             {toast.message}

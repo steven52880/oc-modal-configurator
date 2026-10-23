@@ -67,6 +67,7 @@ hiddenimports += [
     "backend.fields",
     "backend.jsonio",
     "backend.metadata_service",
+    "backend.param_templates",
     "backend.paths",
     "backend.provider_probe",
     "backend.secrets",

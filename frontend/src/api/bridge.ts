@@ -6,6 +6,8 @@ import type {
   Envelope,
   MetadataStatus,
   ModelDefaults,
+  ModelParamRequest,
+  ModelParamResult,
   ProbeResult,
   SaveResult,
   Settings,
@@ -76,6 +78,8 @@ export const bridge = {
     call<ModelDefaults>("match_model_defaults", [modelKey, providerHint ?? null]),
   matchModelsDefaults: (items: Array<{ modelKey: string; providerHint?: string | null }>) =>
     call<ModelDefaults[]>("match_models_defaults", [items]),
+  generateModelParams: (items: ModelParamRequest[]) =>
+    call<ModelParamResult[]>("generate_model_params", [items]),
   probeProviderModels: (baseURL: string, apiKey?: string | null, providerHint?: string | null) =>
     call<ProbeResult>("probe_provider_models", [baseURL, apiKey ?? null, providerHint ?? null]),
   searchCatalog: (providerId?: string | null, query?: string | null, includeAll = false) =>
