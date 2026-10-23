@@ -15,8 +15,11 @@ on demand:
 The ``api.json`` in the repository root is a development sample. Runtime code
 does not read it, and it must not be packaged.
 
-SQLite is not used. Settings are one small document, and the catalog is an
-upstream JSON blob that is loaded once and replaced wholesale.
+The tool's own storage does not use SQLite. Settings are one small document,
+and the catalog is an upstream JSON blob that is loaded once and replaced
+wholesale. cc-switch's ``~/.cc-switch/cc-switch.db`` is a separate, external
+document that the tool can edit (OpenCode providers only); it is never used as
+the tool's own storage.
 """
 
 from __future__ import annotations
@@ -56,6 +59,20 @@ def default_opencode_path() -> Path:
     if override:
         return Path(override).expanduser()
     return DEFAULT_OPENCODE_CONFIG
+
+
+def default_ccswitch_db_path() -> Path:
+    override = os.environ.get("OC_CCSWITCH_DB")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".cc-switch" / "cc-switch.db"
+
+
+def ccswitch_live_path_override() -> Path | None:
+    override = os.environ.get("OC_CCSWITCH_LIVE_PATH")
+    if override:
+        return Path(override).expanduser()
+    return None
 
 
 def frontend_dist() -> Path:

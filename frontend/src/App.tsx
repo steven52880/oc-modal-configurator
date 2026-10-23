@@ -20,6 +20,7 @@ import {
 } from "@mui/material";
 import DeleteSweepOutlinedIcon from "@mui/icons-material/DeleteSweepOutlined";
 import FolderOpenOutlinedIcon from "@mui/icons-material/FolderOpenOutlined";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import SyncIcon from "@mui/icons-material/Sync";
@@ -28,6 +29,7 @@ import { BridgeError, bridge } from "./api/bridge";
 import type {
   AppInfo,
   ConfigDocument,
+  ConfigSource,
   MetadataStatus,
   ModelEntry,
   PROVIDER_COLUMN_IDS,
@@ -82,6 +84,11 @@ export const App: React.FC = () => {
   // Conflict Dialog state
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
+  // Which document is edited: opencode.json directly, or CC Switch's database
+  const [configSource, setConfigSource] = useState<ConfigSource>("opencode");
+  // CC Switch notices are dismissed per load; a reload shows them again
+  const [ccswitchNoticesOpen, setCcswitchNoticesOpen] = useState<boolean>(true);
+
   // Split Pane ratio (default 0.4)
   const [splitRatio, setSplitRatio] = useState<number>(0.4);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
@@ -114,21 +121,27 @@ export const App: React.FC = () => {
     [],
   );
 
+  // Shared success handling for both sources
+  const applyLoadedDocument = useCallback((doc: ConfigDocument) => {
+    setDocumentData(doc);
+    setDirty(false);
+    setConflictMessage(null);
+    setCcswitchNoticesOpen(true);
+    setCheckedProviderKeys([]);
+    setCheckedModelKeys([]);
+    setSelectedProviderKey((prev) => {
+      if (prev && doc.providers.some((p) => p.key === prev)) return prev;
+      return doc.providers[0]?.key ?? null;
+    });
+  }, []);
+
   const loadConfigAtPath = useCallback(
     async (targetPath?: string | null) => {
       setLoadError(null);
       try {
         const doc = await bridge.loadConfig(targetPath ?? null);
-        setDocumentData(doc);
+        applyLoadedDocument(doc);
         setPathInput(doc.path);
-        setDirty(false);
-        setConflictMessage(null);
-        setCheckedProviderKeys([]);
-        setCheckedModelKeys([]);
-        setSelectedProviderKey((prev) => {
-          if (prev && doc.providers.some((p) => p.key === prev)) return prev;
-          return doc.providers[0]?.key ?? null;
-        });
         const refreshedSettings = await bridge.getSettings();
         setSettings(refreshedSettings);
       } catch (err) {
@@ -137,7 +150,38 @@ export const App: React.FC = () => {
         setShowPathBar(true);
       }
     },
-    [],
+    [applyLoadedDocument],
+  );
+
+  const loadCcswitch = useCallback(async () => {
+    setLoadError(null);
+    try {
+      const doc = await bridge.loadCcswitch();
+      applyLoadedDocument(doc);
+    } catch (err) {
+      // Path bar does not apply to the database source
+      setDocumentData(null);
+      setLoadError(err instanceof Error ? err.message : "加载 CC Switch 配置失败");
+    }
+  }, [applyLoadedDocument]);
+
+  // One entry point that routes by source
+  const loadDocument = useCallback(
+    async (source: ConfigSource, targetPath?: string | null) => {
+      if (source === "ccswitch") {
+        await loadCcswitch();
+      } else {
+        await loadConfigAtPath(targetPath);
+      }
+    },
+    [loadCcswitch, loadConfigAtPath],
+  );
+
+  // Reload whatever the current source is
+  const reloadCurrent = useCallback(
+    (fallbackPath?: string | null) =>
+      loadDocument(configSource, fallbackPath ?? documentData?.path ?? pathInput),
+    [configSource, documentData?.path, loadDocument, pathInput],
   );
 
   // Initial Bootstrap
@@ -157,7 +201,10 @@ export const App: React.FC = () => {
         setMetadataStatus(meta);
         setSplitRatio(loadedSettings.splitRatio ?? 0.4);
         setActivePage(loadedSettings.activePage || "providers");
-        await loadConfigAtPath(loadedSettings.lastConfigPath);
+        const source: ConfigSource =
+          loadedSettings.configSource === "ccswitch" ? "ccswitch" : "opencode";
+        setConfigSource(source);
+        await loadDocument(source, loadedSettings.lastConfigPath);
       } catch (err) {
         if (!cancelled) {
           setLoadError(err instanceof Error ? err.message : "初始化应用失败");
@@ -170,7 +217,25 @@ export const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [loadConfigAtPath]);
+  }, [loadDocument]);
+
+  const handleChangeSource = useCallback(
+    async (next: ConfigSource) => {
+      if (next === configSource) return;
+      if (dirty && !window.confirm("当前有未保存的修改，切换来源将丢弃这些修改，是否继续？")) {
+        return;
+      }
+      setConfigSource(next);
+      setShowPathBar(false);
+      try {
+        setSettings(await bridge.updateSettings({ configSource: next }));
+      } catch (err) {
+        notify(err instanceof Error ? err.message : "保存配置来源失败", "warning");
+      }
+      await loadDocument(next, next === "opencode" ? settings?.lastConfigPath ?? null : null);
+    },
+    [configSource, dirty, loadDocument, notify, settings?.lastConfigPath],
+  );
 
   const selectedProvider = useMemo<ProviderEntry | null>(() => {
     if (!documentData || !selectedProviderKey) return null;
@@ -207,12 +272,19 @@ export const App: React.FC = () => {
         );
         setDirty(false);
         setConflictMessage(null);
-        notify(
-          saved.backupPath
-            ? `配置已保存（已自动生成备份 ${saved.backupPath}）`
-            : "配置已保存",
-          "success",
-        );
+        if (documentData.source === "ccswitch") {
+          notify(
+            `已保存到 CC Switch 数据库并同步 opencode.json（数据库备份：${saved.backupPath ?? "无"}）`,
+            "success",
+          );
+        } else {
+          notify(
+            saved.backupPath
+              ? `配置已保存（已自动生成备份 ${saved.backupPath}）`
+              : "配置已保存",
+            "success",
+          );
+        }
       } catch (err) {
         if (err instanceof BridgeError && err.code === "conflict") {
           setConflictMessage(err.message);
@@ -916,12 +988,86 @@ export const App: React.FC = () => {
           >
             {appInfo?.name || "OpenCode 配置编辑器"}
           </Typography>
+          {appInfo?.version && (
+            <Typography
+              variant="caption"
+              sx={{ color: "text.secondary", fontFamily: MONOSPACE_FONT, whiteSpace: "nowrap" }}
+            >
+              v{appInfo.version}
+            </Typography>
+          )}
         </Stack>
 
         {/* Right: Config File, Metadata Source & Status, Save */}
         <Stack direction="row" alignItems="center" spacing={0.75}>
+          {/* Config Source Selector (persisted). The help lives on a separate
+              icon so its tooltip never covers the select or its menu. */}
+          <Select
+            size="small"
+            value={configSource}
+            inputProps={{ "aria-label": "配置来源" }}
+            onChange={(e) => {
+              const next: ConfigSource = e.target.value === "ccswitch" ? "ccswitch" : "opencode";
+              void handleChangeSource(next);
+            }}
+            sx={{
+              height: 26,
+              fontSize: "0.75rem",
+              "& .MuiSelect-select": {
+                py: "2px !important",
+                pl: "8px !important",
+                pr: "24px !important",
+              },
+            }}
+          >
+            <MenuItem value="opencode" sx={{ fontSize: "0.78rem" }}>
+              OpenCode
+            </MenuItem>
+            <MenuItem value="ccswitch" sx={{ fontSize: "0.78rem" }}>
+              CC Switch
+            </MenuItem>
+          </Select>
+          <Tooltip
+            placement="bottom-end"
+            title={
+              <Box sx={{ lineHeight: 1.6 }}>
+                OpenCode：直接编辑 opencode.json
+                <br />
+                CC Switch：编辑 CC Switch 数据库中的 OpenCode 提供商，并同步写入 opencode.json（需先退出 CC Switch）
+              </Box>
+            }
+          >
+            <IconButton size="small" aria-label="配置来源说明" sx={{ p: 0.25, ml: "2px !important" }}>
+              <InfoOutlinedIcon sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
+
+          {/* Current Config File Badge (CC Switch: database, not clickable) */}
+          {documentData && configSource === "ccswitch" && (
+            <Tooltip
+              title={
+                <Box sx={{ lineHeight: 1.6 }}>
+                  数据库: {documentData.path}
+                  {documentData.livePath ? (
+                    <>
+                      <br />
+                      同步写入: {documentData.livePath}
+                    </>
+                  ) : null}
+                </Box>
+              }
+            >
+              <Chip
+                label={documentData.path.split(/[\\/]/).pop() || "cc-switch.db"}
+                size="small"
+                variant="outlined"
+                sx={{ maxWidth: 180, fontFamily: MONOSPACE_FONT }}
+              />
+            </Tooltip>
+          )}
+
           {/* Current Config File Badge */}
-          {documentData && (
+          {documentData && configSource === "opencode" && (
             <Tooltip title={`配置文件路径: ${documentData.path}（点击展开路径输入栏）`}>
               <Chip
                 label={
@@ -944,22 +1090,24 @@ export const App: React.FC = () => {
             </Tooltip>
           )}
 
-          <Tooltip title="打开或切换配置文件">
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<FolderOpenOutlinedIcon fontSize="small" />}
-              onClick={handlePickConfigFile}
-            >
-              打开
-            </Button>
-          </Tooltip>
+          {configSource === "opencode" && (
+            <Tooltip title="打开或切换配置文件">
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<FolderOpenOutlinedIcon fontSize="small" />}
+                onClick={handlePickConfigFile}
+              >
+                打开
+              </Button>
+            </Tooltip>
+          )}
 
-          <Tooltip title="从磁盘重新加载当前配置文件">
+          <Tooltip title={configSource === "ccswitch" ? "从 CC Switch 数据库重新加载" : "从磁盘重新加载当前配置文件"}>
             <IconButton
               size="small"
-              aria-label="重新加载配置文件"
-              onClick={() => void loadConfigAtPath(documentData?.path ?? pathInput)}
+              aria-label="重新加载配置"
+              onClick={() => void reloadCurrent()}
             >
               <RefreshIcon fontSize="small" />
             </IconButton>
@@ -1158,7 +1306,7 @@ export const App: React.FC = () => {
       )}
 
       {/* Collapsible File Path Input Bar (Browser fallback or quick path switch) */}
-      {showPathBar && (
+      {showPathBar && configSource === "opencode" && (
         <Stack
           direction={{ xs: "column", sm: "row" }}
           alignItems={{ xs: "stretch", sm: "center" }}
@@ -1226,6 +1374,49 @@ export const App: React.FC = () => {
         </Stack>
       )}
 
+      {/* CC Switch notices (dismissed per load) */}
+      {configSource === "ccswitch" && documentData?.source === "ccswitch" && ccswitchNoticesOpen && (() => {
+        const locked = documentData.lockedProviders ?? [];
+        const drifted = documentData.driftedProviders ?? [];
+        const notices = documentData.notices ?? [];
+        if (!documentData.running && locked.length === 0 && drifted.length === 0 && notices.length === 0) {
+          return null;
+        }
+        return (
+          <Stack
+            spacing={0.5}
+            sx={{ px: 1.5, py: 0.75, borderBottom: "1px solid #cbd5e1", flexShrink: 0 }}
+          >
+            {documentData.running && (
+              <Alert severity="warning" sx={{ py: 0 }} onClose={() => setCcswitchNoticesOpen(false)}>
+                检测到 CC Switch 正在运行，保存前请完全退出 CC Switch（包括托盘）
+              </Alert>
+            )}
+            {drifted.length > 0 && (
+              <Alert severity="warning" sx={{ py: 0 }} onClose={() => setCcswitchNoticesOpen(false)}>
+                以下提供商在 opencode.json 中与 CC Switch 数据库不一致，已按 opencode.json 载入（CC Switch 下次启动也会以它为准）：
+                {drifted.join("、")}
+              </Alert>
+            )}
+            {locked.length > 0 && (
+              <Alert severity="info" sx={{ py: 0 }} onClose={() => setCcswitchNoticesOpen(false)}>
+                以下条目由 CC Switch 管理或格式暂不支持，已隐藏且不会被修改：
+                {locked.map((item) => (
+                  <Typography key={item.key} variant="caption" component="div">
+                    {item.name} ({item.key})：{item.reason}
+                  </Typography>
+                ))}
+              </Alert>
+            )}
+            {notices.map((message) => (
+              <Alert key={message} severity="info" sx={{ py: 0 }} onClose={() => setCcswitchNoticesOpen(false)}>
+                {message}
+              </Alert>
+            ))}
+          </Stack>
+        );
+      })()}
+
       {/* Load / JSON Error Banner */}
       {loadError && (
         <Alert
@@ -1235,13 +1426,14 @@ export const App: React.FC = () => {
             <Button
               color="inherit"
               size="small"
-              onClick={() => void loadConfigAtPath(pathInput || null)}
+              onClick={() => void reloadCurrent(pathInput || null)}
             >
               重试加载
             </Button>
           }
         >
-          加载配置文件失败：{loadError}
+          {configSource === "ccswitch" ? "加载 CC Switch 配置失败：" : "加载配置文件失败："}
+          {loadError}
         </Alert>
       )}
 
@@ -1255,7 +1447,7 @@ export const App: React.FC = () => {
         >
           <CircularProgress size={28} />
           <Typography variant="body2" sx={{ color: "text.secondary" }}>
-            正在加载 OpenCode 配置文件与工作区状态...
+            正在加载配置与工作区状态...
           </Typography>
         </Stack>
       ) : activePage === "providers" && documentData ? (
@@ -1444,7 +1636,7 @@ export const App: React.FC = () => {
           <Button
             variant="outlined"
             color="primary"
-            onClick={() => void loadConfigAtPath(documentData?.path)}
+            onClick={() => void reloadCurrent()}
           >
             重新加载外部文件
           </Button>

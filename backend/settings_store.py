@@ -17,7 +17,10 @@ DEFAULT_SETTINGS = {
     "modelColumns": {},
     "lastConfigPath": None,
     "recentConfigPaths": [],
+    "configSource": "opencode",
 }
+
+CONFIG_SOURCES = ("opencode", "ccswitch")
 
 
 def _defaults() -> dict:
@@ -30,6 +33,7 @@ def _defaults() -> dict:
         "modelColumns": {},
         "lastConfigPath": None,
         "recentConfigPaths": [],
+        "configSource": DEFAULT_SETTINGS["configSource"],
     }
 
 
@@ -81,6 +85,8 @@ class SettingsStore:
             current["lastConfigPath"] = _path_or_none(patch.get("lastConfigPath"))
         if isinstance(patch.get("recentConfigPaths"), list):
             current["recentConfigPaths"] = _recent(patch["recentConfigPaths"])
+        if patch.get("configSource") in CONFIG_SOURCES:
+            current["configSource"] = patch["configSource"]
         return self.save(current)
 
     def remember_config_path(self, path: str) -> dict:
@@ -125,6 +131,8 @@ def _merge(data: dict) -> dict:
     settings["lastConfigPath"] = _path_or_none(data.get("lastConfigPath"))
     if isinstance(data.get("recentConfigPaths"), list):
         settings["recentConfigPaths"] = _recent(data["recentConfigPaths"])
+    if data.get("configSource") in CONFIG_SOURCES:
+        settings["configSource"] = data["configSource"]
     settings["version"] = SETTINGS_VERSION
     return settings
 

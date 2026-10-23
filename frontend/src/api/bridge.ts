@@ -63,6 +63,7 @@ async function call<T>(method: string, args: unknown[]): Promise<T> {
 export const bridge = {
   getAppInfo: () => call<AppInfo>("get_app_info", []),
   loadConfig: (path?: string | null) => call<ConfigDocument>("load_config", [path ?? null]),
+  loadCcswitch: () => call<ConfigDocument>("load_ccswitch", []),
   saveConfig: (document: ConfigDocument, force = false) =>
     call<SaveResult>("save_config", [document, force]),
   pickConfigFile: () => call<{ path: string } | null>("pick_config_file", []),

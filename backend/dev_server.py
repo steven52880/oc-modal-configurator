@@ -9,6 +9,7 @@ PUBLIC_METHODS = (
     "get_app_info",
     "load_config",
     "save_config",
+    "load_ccswitch",
     "pick_config_file",
     "get_metadata_status",
     "refresh_metadata",

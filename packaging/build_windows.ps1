@@ -2,10 +2,16 @@ $ErrorActionPreference = "Stop"
 $Project = Split-Path -Parent $PSScriptRoot
 Set-Location $Project
 
-$Python = Join-Path $Project ".venv\Scripts\python.exe"
-if (-not (Test-Path $Python)) {
-    throw "Missing $Python. Create the project virtual environment before packaging."
+# Project-local virtual environment: venv\ first, then .venv\.
+$Python = $null
+foreach ($Name in @("venv", ".venv")) {
+    $Candidate = Join-Path $Project "$Name\Scripts\python.exe"
+    if (Test-Path $Candidate) { $Python = $Candidate; break }
 }
+if (-not $Python) {
+    throw "Missing venv\Scripts\python.exe (or .venv). Create the project virtual environment before packaging."
+}
+Write-Host "Python: $Python"
 
 & $Python -m pip install --disable-pip-version-check "pyinstaller>=6.0,<7"
 if ($LASTEXITCODE -ne 0) { throw "pyinstaller install failed" }

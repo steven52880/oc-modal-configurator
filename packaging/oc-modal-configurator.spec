@@ -43,6 +43,8 @@ runtime_dlls = [
     "liblzma.dll",
     "LIBBZ2.dll",
     "ffi.dll",
+    # _sqlite3.pyd links against it; the CC Switch source reads cc-switch.db.
+    "sqlite3.dll",
 ]
 if conda_bin is not None and conda_bin.is_dir():
     runtime_dlls += [path.name for path in conda_bin.glob("zlib*.dll")]
@@ -58,6 +60,7 @@ hiddenimports += [
     "proxy_tools",
     "backend",
     "backend.bridge",
+    "backend.ccswitch_service",
     "backend.config_service",
     "backend.dev_server",
     "backend.errors",

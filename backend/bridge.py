@@ -4,6 +4,8 @@ import sys
 import threading
 from pathlib import Path
 
+from backend import __version__
+from backend.ccswitch_service import CcSwitchService
 from backend.config_service import ConfigService
 from backend.errors import ServiceError
 from backend.metadata_service import MetadataService
@@ -15,10 +17,17 @@ from backend.settings_store import SettingsStore
 class Bridge:
     """JSON API shared by the pywebview window and the local dev server."""
 
-    def __init__(self, config: ConfigService, metadata: MetadataService, settings: SettingsStore):
+    def __init__(
+        self,
+        config: ConfigService,
+        metadata: MetadataService,
+        settings: SettingsStore,
+        ccswitch: CcSwitchService | None = None,
+    ):
         self._config = config
         self._metadata = metadata
         self._settings = settings
+        self._ccswitch = ccswitch if ccswitch is not None else CcSwitchService()
         self._window = None
         self._lock = threading.Lock()
         self._pending_window = None
@@ -35,6 +44,9 @@ class Bridge:
 
     def save_config(self, document: dict, force: bool = False) -> dict:
         return self._call(lambda: self._save_config(document, bool(force)))
+
+    def load_ccswitch(self) -> dict:
+        return self._call(self._ccswitch.load)
 
     def pick_config_file(self) -> dict:
         return self._call(self._pick_config_file)
@@ -106,6 +118,8 @@ class Bridge:
         return document
 
     def _save_config(self, document: dict, force: bool) -> dict:
+        if isinstance(document, dict) and document.get("source") == "ccswitch":
+            return self._ccswitch.save(document, force)
         saved = self._config.save(document, force)
         with self._lock:
             self._settings.remember_config_path(saved["path"])
@@ -188,10 +202,12 @@ class Bridge:
         cache = getattr(source, "cache_path", None)
         return {
             "name": "OpenCode 配置编辑器",
+            "version": __version__,
             "platform": sys.platform,
             "python": platform.python_version(),
             "storage": "settings-file",
             "settingsPath": str(self._settings.path),
             "catalogCachePath": None if cache is None else str(cache),
             "defaultConfigPath": str(self._config.default_path),
+            "ccswitchDbPath": str(self._ccswitch.db_path),
         }

@@ -71,6 +71,7 @@ def document_from_raw(raw: dict, path: Path, exists: bool, mtime_ns: int | None)
         raise ServiceError("invalid_json", "provider 必须是对象")
     preserved = {key: value for key, value in raw.items() if key != "provider"}
     return {
+        "source": "opencode",
         "path": str(path),
         "exists": exists,
         "mtimeNs": None if mtime_ns is None else str(mtime_ns),

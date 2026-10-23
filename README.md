@@ -23,6 +23,7 @@
   - 支持从提供商 `${baseURL}/models` 实时拉取模型并按前缀自动折叠分组；
   - 内置 `models.dev` 默认值引擎（预留多数据源接口），按需下载至用户缓存目录；
   - 若处于防火墙/内网环境无法在线下载模型库，界面直接提示下载链接与本地目标路径，放入文件后点击「已放好，重新读取」即可热加载。
+- **CC Switch 数据源**：页面头部「配置来源」可切换为 CC Switch，直接编辑 `~/.cc-switch/cc-switch.db` 中的 OpenCode 提供商，并同步写入 `opencode.json`（CC Switch 每次启动都会以 `opencode.json` 为准）。保存前需完全退出 CC Switch；仅支持已验证的数据库版本 v19–v21，其它版本自动禁止读写；OMO 配置与 OpenCode V2 原生格式条目只读展示、不会被修改；保存前生成 `cc-switch.db.oc-modal.bak` 与 `opencode.json.bak` 备份。
 - **安全保存与外部修改冲突检测**：保存前自动生成同目录 `.bak` 备份；通过纳秒级修改时间 (`mtimeNs`) 检测外部编辑器改动，发生冲突时弹窗询问重新加载或强制覆盖。
 
 ---
@@ -44,6 +45,7 @@ oc-modal-configurator/
 ├── backend/                      # Python 本地后端服务
 │   ├── bridge.py                 # 暴露给 pywebview 与 HTTP 开发服务器的统一 JSON RPC Bridge
 │   ├── config_service.py         # opencode.json 无损读写、校验、.bak 备份与 mtimeNs 冲突检测
+│   ├── ccswitch_service.py       # CC Switch 数据库中 OpenCode 提供商的读写、版本白名单与 opencode.json 同步
 │   ├── metadata_service.py       # 模型库数据源抽象 (MetadataSource)、本地缓存索引与默认值匹配引擎
 │   ├── provider_probe.py         # 提供商 /models 在线拉取、解析与前缀分组
 │   ├── settings_store.py         # 工具自身状态存储 (~/.config/oc-modal-configurator/settings.json)
@@ -90,14 +92,14 @@ oc-modal-configurator/
 
 ### 2. 从源码启动桌面窗口
 
-本项目将依赖安装在工作目录内的 `.venv` 和 `frontend/node_modules` 中，不污染全局环境。
+本项目将依赖安装在工作目录内的 `venv` 和 `frontend/node_modules` 中，不污染全局环境。
 
 #### 环境准备（首次运行）
 
 ```powershell
 # 1. 创建项目虚拟环境并安装 pywebview
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
 
 # 2. 安装前端依赖并构建静态资源（若官方 npm 源受阻可使用 npmmirror）
 cd frontend
@@ -110,17 +112,17 @@ cd ..
 
 ```powershell
 # 默认加载并编辑 ~/.config/opencode/opencode.json
-.\.venv\Scripts\python.exe app.py
+.\venv\Scripts\python.exe app.py
 
 # 或通过 --config 指定任意配置文件路径
-.\.venv\Scripts\python.exe app.py --config "D:\path\to\opencode.json"
+.\venv\Scripts\python.exe app.py --config "D:\path\to\opencode.json"
 ```
 
 ---
 
 ### 3. 开发与调试模式
 
-在开发模式下，后端会自动将操作隔离到项目内的 `.dev/opencode.json` 和 `.dev/appdata/`，**绝不会修改你真实用户目录下的 `~/.config/opencode/opencode.json`**。
+在开发模式下，后端会自动将操作隔离到项目内的 `.dev/opencode.json` 和 `.dev/appdata/`，**绝不会修改你真实用户目录下的 `~/.config/opencode/opencode.json`**。CC Switch 数据源同样隔离：首次启动时把真实的 `~/.cc-switch/cc-switch.db` 只读复制为 `.dev/cc-switch.db`，之后只读写这份副本，并以 `.dev/opencode.json` 作为同步目标。
 
 ```powershell
 # 终端 1：启动前端 Vite 开发服务器 (http://127.0.0.1:5173)
@@ -128,10 +130,10 @@ cd frontend
 npm run dev
 
 # 终端 2（方式 A）：启动本地 API 服务 + 打开指向 Vite 的原生桌面窗口
-.\.venv\Scripts\python.exe app.py --dev
+.\venv\Scripts\python.exe app.py --dev
 
 # 终端 2（方式 B）：仅启动本地 API 服务 (http://127.0.0.1:8765)，直接在浏览器访问 http://127.0.0.1:5173 调试
-.\.venv\Scripts\python.exe app.py --dev-server
+.\venv\Scripts\python.exe app.py --dev-server
 ```
 
 ---
@@ -154,7 +156,7 @@ npm run dev
 ### 运行后端单元测试
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest tests.test_backend -v
+.\venv\Scripts\python.exe -m unittest tests.test_backend -v
 ```
 
 ### 重新打包 Windows 可执行文件夹与压缩包

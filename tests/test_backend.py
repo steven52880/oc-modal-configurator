@@ -1,10 +1,14 @@
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from backend.bridge import Bridge
+from backend.ccswitch_service import CcSwitchService
+from backend.errors import ServiceError
 from backend.config_service import ConfigService, document_from_raw, to_raw
 from backend.fields import model_prefix
 from backend.metadata_service import MetadataService
@@ -268,6 +272,229 @@ class BridgeTests(unittest.TestCase):
             again = bridge.load_config(str(root / "opencode.json"))
             self.assertEqual(again["data"]["preserved"]["plugin"], ["keep"])
             self.assertEqual(again["data"]["providers"][0]["models"][0]["key"], "gpt-6-astra")
+
+
+CCSWITCH_DDL = """
+CREATE TABLE providers (id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL, settings_config TEXT NOT NULL, website_url TEXT, category TEXT, created_at INTEGER, sort_index INTEGER, notes TEXT, icon TEXT, icon_color TEXT, meta TEXT NOT NULL DEFAULT '{}', is_current BOOLEAN NOT NULL DEFAULT 0, in_failover_queue BOOLEAN NOT NULL DEFAULT 0, cost_multiplier TEXT NOT NULL DEFAULT '1.0', limit_daily_usd TEXT, limit_monthly_usd TEXT, provider_type TEXT, PRIMARY KEY (id, app_type));
+CREATE TABLE provider_endpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, url TEXT NOT NULL, added_at INTEGER, FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE);
+PRAGMA user_version = 21;
+"""
+
+ALPHA = {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "Alpha",
+    "options": {"baseURL": "https://a.test/v1", "apiKey": "{env:ALPHA_KEY}"},
+    "models": {"m1": {"name": "M1"}},
+}
+DBONLY = {"npm": "@ai-sdk/openai-compatible", "name": "DB Only", "options": {"baseURL": "https://d.test/v1"}, "models": {}}
+
+
+class CcSwitchTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        root = Path(self.directory.name)
+        self.db = root / "cc-switch.db"
+        self.live = root / "opencode.json"
+        self.running = False
+        with closing(sqlite3.connect(str(self.db))) as conn:
+            conn.executescript(CCSWITCH_DDL)
+            rows = [
+                ("alpha", "opencode", "Alpha", json.dumps(ALPHA), None, 1000, 1, '{"liveConfigManaged":true}', "star", "2.5"),
+                ("omo", "opencode", "OMO", json.dumps({"agents": {}}), "omo", 1001, 0, "{}", None, "1.0"),
+                ("v2", "opencode", "V2", json.dumps({"package": "x", "settings": {}}), None, 1002, 2, "{}", None, "1.0"),
+                ("dbonly", "opencode", "DB Only", json.dumps(DBONLY), None, 1003, 3, '{"liveConfigManaged":false}', None, "1.0"),
+                ("alpha", "claude", "Claude Alpha", json.dumps({"env": {}}), None, 1004, 0, "{}", None, "1.0"),
+            ]
+            conn.executemany(
+                "INSERT INTO providers (id, app_type, name, settings_config, category, created_at, sort_index, meta, icon, cost_multiplier) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.execute("INSERT INTO provider_endpoints (provider_id, app_type, url) VALUES ('alpha', 'opencode', 'https://a.test')")
+            conn.commit()
+        self.live.write_text(
+            json.dumps({"$schema": "https://opencode.ai/config.json", "plugin": ["keep"], "provider": {"alpha": ALPHA}}),
+            encoding="utf-8",
+        )
+        self.service = CcSwitchService(self.db, self.live, lambda: self.running)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def query(self, sql, params=()):
+        with closing(sqlite3.connect(str(self.db))) as conn:
+            return conn.execute(sql, params).fetchall()
+
+    def live_data(self):
+        return json.loads(self.live.read_text(encoding="utf-8"))
+
+    def provider(self, document, key):
+        return next(item for item in document["providers"] if item["key"] == key)
+
+    def test_load_lists_editable_and_locks_others(self):
+        document = self.service.load()
+        self.assertEqual(document["source"], "ccswitch")
+        self.assertEqual(document["schemaVersion"], 21)
+        self.assertEqual([item["key"] for item in document["providers"]], ["alpha", "dbonly"])
+        locked = {item["key"]: item["reason"] for item in document["lockedProviders"]}
+        self.assertEqual(set(locked), {"omo", "v2"})
+        self.assertIn("OMO", locked["omo"])
+        self.assertIn("V2", locked["v2"])
+        self.assertEqual(document["driftedProviders"], [])
+        self.assertEqual(document["livePath"], str(self.live))
+
+    def test_unsupported_schema_version_blocks_load_and_save(self):
+        with closing(sqlite3.connect(str(self.db))) as conn:
+            conn.execute("PRAGMA user_version = 22")
+        with self.assertRaises(ServiceError) as caught:
+            self.service.load()
+        self.assertEqual(caught.exception.code, "ccswitch_unsupported")
+        with self.assertRaises(ServiceError) as caught:
+            self.service.save({"source": "ccswitch", "providers": [], "mtimeNs": "x"}, force=True)
+        self.assertEqual(caught.exception.code, "ccswitch_unsupported")
+        self.assertEqual(len(self.query("SELECT id FROM providers WHERE app_type='opencode'")), 4)
+
+    def test_update_preserves_columns_and_writes_live(self):
+        document = self.service.load()
+        alpha = self.provider(document, "alpha")
+        alpha["name"] = "Alpha Renamed"
+        alpha["options"]["baseURL"] = "https://a2.test/v1"
+        saved = self.service.save(document)
+        row = self.query(
+            "SELECT name, settings_config, meta, icon, cost_multiplier, sort_index FROM providers WHERE id='alpha' AND app_type='opencode'"
+        )[0]
+        self.assertEqual(row[0], "Alpha Renamed")
+        self.assertEqual(json.loads(row[1])["options"]["baseURL"], "https://a2.test/v1")
+        self.assertEqual(row[2:], ('{"liveConfigManaged":true}', "star", "2.5", 1))
+        self.assertEqual(self.query("SELECT name FROM providers WHERE app_type='claude'"), [("Claude Alpha",)])
+        live = self.live_data()
+        self.assertEqual(live["plugin"], ["keep"])
+        self.assertEqual(live["$schema"], "https://opencode.ai/config.json")
+        self.assertEqual(live["provider"]["alpha"]["options"]["baseURL"], "https://a2.test/v1")
+        self.assertNotIn("dbonly", live["provider"])
+        self.assertTrue(Path(saved["backupPath"]).is_file())
+        self.assertTrue(saved["backupPath"].endswith(".oc-modal.bak"))
+        self.assertTrue(Path(saved["liveBackupPath"]).is_file())
+        self.assertEqual(saved["mtimeNs"], self.service.load()["mtimeNs"])
+
+    def test_insert_assigns_order_and_managed_meta(self):
+        document = self.service.load()
+        document["providers"].append(
+            {"key": "beta", "name": "Beta", "npm": "@ai-sdk/openai", "options": {"baseURL": "https://b.test/v1"},
+             "optionsExtra": {}, "extra": {}, "models": []}
+        )
+        self.service.save(document)
+        row = self.query(
+            "SELECT name, category, sort_index, meta, created_at, cost_multiplier FROM providers WHERE id='beta' AND app_type='opencode'"
+        )[0]
+        self.assertEqual(row[:4], ("Beta", None, 4, '{"liveConfigManaged":true}'))
+        self.assertGreater(row[4], 0)
+        self.assertEqual(row[5], "1.0")
+        self.assertIn("beta", self.live_data()["provider"])
+
+    def test_delete_cascades_and_removes_from_live(self):
+        document = self.service.load()
+        document["providers"] = [item for item in document["providers"] if item["key"] != "alpha"]
+        self.service.save(document)
+        self.assertEqual(self.query("SELECT id FROM providers WHERE id='alpha' AND app_type='opencode'"), [])
+        self.assertEqual(self.query("SELECT id FROM provider_endpoints"), [])
+        self.assertEqual(len(self.query("SELECT id FROM providers WHERE id='alpha' AND app_type='claude'")), 1)
+        self.assertEqual(len(self.query("SELECT id FROM providers WHERE id IN ('omo','v2')")), 2)
+        self.assertNotIn("alpha", self.live_data()["provider"])
+
+    def test_db_only_row_is_not_written_to_live(self):
+        document = self.service.load()
+        self.provider(document, "dbonly")["options"]["baseURL"] = "https://d2.test/v1"
+        self.service.save(document)
+        stored = json.loads(self.query("SELECT settings_config FROM providers WHERE id='dbonly'")[0][0])
+        self.assertEqual(stored["options"]["baseURL"], "https://d2.test/v1")
+        self.assertNotIn("dbonly", self.live_data()["provider"])
+
+    def test_locked_key_collision_is_rejected(self):
+        document = self.service.load()
+        document["providers"].append(
+            {"key": "omo", "name": None, "npm": None, "options": {}, "optionsExtra": {}, "extra": {}, "models": []}
+        )
+        with self.assertRaises(ServiceError) as caught:
+            self.service.save(document)
+        self.assertEqual(caught.exception.code, "validation_error")
+        self.assertEqual(json.loads(self.query("SELECT settings_config FROM providers WHERE id='omo'")[0][0]), {"agents": {}})
+
+    def test_conflict_after_external_change_and_force(self):
+        document = self.service.load()
+        with closing(sqlite3.connect(str(self.db))) as conn:
+            conn.execute("UPDATE providers SET name='Changed' WHERE id='dbonly' AND app_type='opencode'")
+            conn.commit()
+        with self.assertRaises(ServiceError) as caught:
+            self.service.save(document)
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertEqual(self.query("SELECT name FROM providers WHERE id='dbonly'"), [("Changed",)])
+        self.service.save(document, force=True)
+        self.assertEqual(self.query("SELECT name FROM providers WHERE id='dbonly'"), [("DB Only",)])
+
+    def test_running_cc_switch_blocks_save(self):
+        document = self.service.load()
+        self.provider(document, "alpha")["name"] = "Nope"
+        before = self.db.read_bytes()
+        live_before = self.live.read_bytes()
+        self.running = True
+        with self.assertRaises(ServiceError) as caught:
+            self.service.save(document)
+        self.assertEqual(caught.exception.code, "ccswitch_running")
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(self.live.read_bytes(), live_before)
+        self.assertFalse(self.db.with_name(self.db.name + ".oc-modal.bak").exists())
+
+    def test_drift_prefers_live_content(self):
+        changed = dict(ALPHA, options={"baseURL": "https://live.test/v1"})
+        self.live.write_text(json.dumps({"provider": {"alpha": changed}}), encoding="utf-8")
+        document = self.service.load()
+        self.assertEqual(document["driftedProviders"], ["alpha"])
+        self.assertEqual(self.provider(document, "alpha")["options"]["baseURL"], "https://live.test/v1")
+
+    def test_live_v2_provider_locks_row_and_jsonc_blocks_save(self):
+        self.live.write_text(json.dumps({"providers": {"alpha": {}}, "provider": {}}), encoding="utf-8")
+        document = self.service.load()
+        self.assertIn("alpha", [item["key"] for item in document["lockedProviders"]])
+        jsonc = Path(self.directory.name) / "opencode.jsonc"
+        jsonc.write_text("{ // comment\n}", encoding="utf-8")
+        service = CcSwitchService(self.db, jsonc, lambda: False)
+        loaded = service.load()
+        self.assertTrue(loaded["notices"])
+        with self.assertRaises(ServiceError) as caught:
+            service.save(loaded)
+        self.assertEqual(caught.exception.code, "ccswitch_live_unsupported")
+
+    def test_missing_db(self):
+        service = CcSwitchService(Path(self.directory.name) / "absent.db", self.live, lambda: False)
+        with self.assertRaises(ServiceError) as caught:
+            service.load()
+        self.assertEqual(caught.exception.code, "ccswitch_missing")
+
+    def test_bridge_routes_ccswitch_documents(self):
+        root = Path(self.directory.name)
+        bridge = Bridge(
+            ConfigService(root / "plain.json"),
+            MetadataService(root / "cache.json", root / "cache.meta.json"),
+            SettingsStore(root / "settings.json"),
+            self.service,
+        )
+        loaded = bridge.load_ccswitch()
+        self.assertTrue(loaded["ok"], loaded)
+        saved = bridge.save_config(loaded["data"])
+        self.assertTrue(saved["ok"], saved)
+        self.assertFalse((root / "plain.json").exists())
+        self.assertEqual(bridge.get_app_info()["data"]["ccswitchDbPath"], str(self.db))
+        self.assertEqual(bridge.load_config(str(root / "plain.json"))["data"]["source"], "opencode")
+
+    def test_settings_config_source(self):
+        store = SettingsStore(Path(self.directory.name) / "settings.json")
+        self.assertEqual(store.load()["configSource"], "opencode")
+        self.assertEqual(store.update({"configSource": "ccswitch"})["configSource"], "ccswitch")
+        self.assertEqual(store.load()["configSource"], "ccswitch")
+        self.assertEqual(store.update({"configSource": "bogus"})["configSource"], "ccswitch")
+        (Path(self.directory.name) / "settings.json").write_text(json.dumps({"configSource": "bogus"}), encoding="utf-8")
+        self.assertEqual(store.load()["configSource"], "opencode")
 
 
 MINI_CATALOG = {

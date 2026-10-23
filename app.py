@@ -10,13 +10,16 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sqlite3
 import sys
 import threading
+from contextlib import closing
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from backend.bridge import Bridge
+from backend.ccswitch_service import CcSwitchService
 from backend.config_service import ConfigService
 from backend.jsonio import write_json
 from backend.metadata_service import MetadataService
@@ -37,12 +40,14 @@ def main() -> None:
         os.environ["OC_APP_CONFIG_DIR"] = str(DEV_DIR / "appdata")
         if args.config is None:
             os.environ["OC_CONFIG_PATH"] = str(ensure_dev_config())
+        isolate_dev_ccswitch(args.config)
 
     config_path = Path(args.config).expanduser() if args.config else None
     bridge = Bridge(
         ConfigService(config_path),
         MetadataService(),
         SettingsStore(),
+        CcSwitchService(),
     )
 
     if args.dev or args.dev_server:
@@ -76,7 +81,7 @@ def open_window(bridge: Bridge, url: str) -> None:
     try:
         import webview
     except ImportError as exc:
-        raise SystemExit("未安装 pywebview。请使用项目内的 .venv 运行。") from exc
+        raise SystemExit("未安装 pywebview。请使用项目内的 venv 运行。") from exc
 
     settings = bridge._read_settings()
     window_state = settings["window"]
@@ -184,6 +189,22 @@ def ensure_dev_config() -> Path:
     if not DEV_CONFIG.exists():
         write_json(DEV_CONFIG, {"provider": {}})
     return DEV_CONFIG
+
+
+def isolate_dev_ccswitch(config: str | None) -> None:
+    """Point the cc-switch source at project-local copies so dev never writes real files."""
+    if "OC_CCSWITCH_DB" not in os.environ:
+        DEV_DIR.mkdir(parents=True, exist_ok=True)
+        dev_db = DEV_DIR / "cc-switch.db"
+        real_db = Path.home() / ".cc-switch" / "cc-switch.db"
+        if not dev_db.exists() and real_db.is_file():
+            with closing(sqlite3.connect(f"{real_db.resolve().as_uri()}?mode=ro", uri=True)) as src:
+                with closing(sqlite3.connect(str(dev_db))) as dst:
+                    src.backup(dst)
+        os.environ["OC_CCSWITCH_DB"] = str(dev_db)
+    live = Path(config).expanduser() if config else DEV_CONFIG
+    os.environ["OC_CCSWITCH_LIVE_PATH"] = str(live)
+    os.environ["OC_CCSWITCH_SKIP_RUNNING_CHECK"] = "1"
 
 
 if __name__ == "__main__":

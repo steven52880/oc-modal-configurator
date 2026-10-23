@@ -31,13 +31,18 @@ export interface Envelope<T> {
 
 export interface AppInfo {
   name: string;
+  version: string;
   platform: string;
   python: string;
   storage: "settings-file";
   settingsPath: string;
   catalogCachePath: string | null;
   defaultConfigPath: string;
+  ccswitchDbPath: string;
 }
+
+export const CONFIG_SOURCES = ["opencode", "ccswitch"] as const;
+export type ConfigSource = (typeof CONFIG_SOURCES)[number];
 
 export interface Settings {
   version: number;
@@ -48,6 +53,7 @@ export interface Settings {
   modelColumns: Record<string, number>;
   lastConfigPath: string | null;
   recentConfigPaths: string[];
+  configSource: ConfigSource;
 }
 
 export interface HeaderMap {
@@ -133,19 +139,40 @@ export interface ProviderEntry {
   models: ModelEntry[];
 }
 
+export interface LockedProvider {
+  key: string;
+  name: string;
+  reason: string;
+}
+
 export interface ConfigDocument {
+  /** Which backend owns this document. The save call is routed by it. */
+  source?: ConfigSource;
+  /** opencode.json path, or the cc-switch.db path for the ccswitch source. */
   path: string;
   exists: boolean;
+  /** File mtime for opencode; an opaque fingerprint for ccswitch. */
   mtimeNs: MtimeNs;
   /** Top-level opencode.json fields other than provider. Pass this through unchanged. */
   preserved: Record<string, unknown>;
   providers: ProviderEntry[];
+  /** ccswitch only: the opencode.json kept in sync on save. */
+  livePath?: string | null;
+  /** ccswitch only: rows shown nowhere and never modified (OMO, V2 native, unreadable). */
+  lockedProviders?: LockedProvider[];
+  /** ccswitch only: providers loaded from opencode.json because it differs from the database. */
+  driftedProviders?: string[];
+  notices?: string[];
+  running?: boolean;
+  schemaVersion?: number;
 }
 
 export interface SaveResult {
   path: string;
   backupPath: string | null;
   mtimeNs: string;
+  livePath?: string | null;
+  liveBackupPath?: string | null;
 }
 
 export interface MetadataSourceInfo {
