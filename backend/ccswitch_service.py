@@ -30,7 +30,7 @@ from backend.errors import ServiceError
 from backend.jsonio import write_json
 from backend.paths import ccswitch_live_path_override, default_ccswitch_db_path
 
-SUPPORTED_SCHEMA_VERSIONS = frozenset({19, 20, 21})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({19, 20, 21, 22, 23})
 REQUIRED_COLUMNS = frozenset(
     {"id", "app_type", "name", "settings_config", "category", "created_at", "sort_index", "meta"}
 )
@@ -200,7 +200,7 @@ def _check_schema(conn: sqlite3.Connection) -> int:
     if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ServiceError(
             "ccswitch_unsupported",
-            f"CC Switch 数据库版本 v{version} 尚未适配（已验证 v19–v21），为避免损坏已禁止读写。请更新本工具。",
+            f"CC Switch 数据库版本 v{version} 尚未适配（已验证 v19–v23），为避免损坏已禁止读写。请更新本工具。",
         )
     columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(providers)").fetchall()}
     if not columns:

@@ -329,7 +329,7 @@ class BridgeTests(unittest.TestCase):
 CCSWITCH_DDL = """
 CREATE TABLE providers (id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL, settings_config TEXT NOT NULL, website_url TEXT, category TEXT, created_at INTEGER, sort_index INTEGER, notes TEXT, icon TEXT, icon_color TEXT, meta TEXT NOT NULL DEFAULT '{}', is_current BOOLEAN NOT NULL DEFAULT 0, in_failover_queue BOOLEAN NOT NULL DEFAULT 0, cost_multiplier TEXT NOT NULL DEFAULT '1.0', limit_daily_usd TEXT, limit_monthly_usd TEXT, provider_type TEXT, PRIMARY KEY (id, app_type));
 CREATE TABLE provider_endpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, url TEXT NOT NULL, added_at INTEGER, FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE);
-PRAGMA user_version = 21;
+PRAGMA user_version = 23;
 """
 
 ALPHA = {
@@ -386,7 +386,7 @@ class CcSwitchTests(unittest.TestCase):
     def test_load_lists_editable_and_locks_others(self):
         document = self.service.load()
         self.assertEqual(document["source"], "ccswitch")
-        self.assertEqual(document["schemaVersion"], 21)
+        self.assertEqual(document["schemaVersion"], 23)
         self.assertEqual([item["key"] for item in document["providers"]], ["alpha", "dbonly"])
         locked = {item["key"]: item["reason"] for item in document["lockedProviders"]}
         self.assertEqual(set(locked), {"omo", "v2"})
@@ -397,7 +397,7 @@ class CcSwitchTests(unittest.TestCase):
 
     def test_unsupported_schema_version_blocks_load_and_save(self):
         with closing(sqlite3.connect(str(self.db))) as conn:
-            conn.execute("PRAGMA user_version = 22")
+            conn.execute("PRAGMA user_version = 24")
         with self.assertRaises(ServiceError) as caught:
             self.service.load()
         self.assertEqual(caught.exception.code, "ccswitch_unsupported")

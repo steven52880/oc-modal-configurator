@@ -23,7 +23,7 @@
   - 支持从提供商 `${baseURL}/models` 实时拉取模型并按前缀自动折叠分组；
   - 内置 `models.dev` 默认值引擎（预留多数据源接口），按需下载至用户缓存目录；
   - 若处于防火墙/内网环境无法在线下载模型库，界面直接提示下载链接与本地目标路径，放入文件后点击「已放好，重新读取」即可热加载。
-- **CC Switch 数据源**：页面头部「配置来源」可切换为 CC Switch，直接编辑 `~/.cc-switch/cc-switch.db` 中的 OpenCode 提供商，并同步写入 `opencode.json`（CC Switch 每次启动都会以 `opencode.json` 为准）。保存前需完全退出 CC Switch；仅支持已验证的数据库版本 v19–v21，其它版本自动禁止读写；OMO 配置与 OpenCode V2 原生格式条目只读展示、不会被修改；保存前生成 `cc-switch.db.oc-modal.bak` 与 `opencode.json.bak` 备份。
+- **CC Switch 数据源**：页面头部「配置来源」可切换为 CC Switch，直接编辑 `~/.cc-switch/cc-switch.db` 中的 OpenCode 提供商，并同步写入 `opencode.json`（CC Switch 每次启动都会以 `opencode.json` 为准）。保存前需完全退出 CC Switch；仅支持已验证的数据库版本 v19–v23，其它版本自动禁止读写；OMO 配置与 OpenCode V2 原生格式条目只读展示、不会被修改；保存前生成 `cc-switch.db.oc-modal.bak` 与 `opencode.json.bak` 备份。
 - **安全保存与外部修改冲突检测**：保存前自动生成同目录 `.bak` 备份；通过纳秒级修改时间 (`mtimeNs`) 检测外部编辑器改动，发生冲突时弹窗询问重新加载或强制覆盖。
 
 ---
