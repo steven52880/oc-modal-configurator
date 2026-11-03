@@ -1,0 +1,53 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows package
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Create project virtual environment
+        shell: pwsh
+        run: python -m venv venv
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: .\venv\Scripts\python.exe -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Run backend unit tests
+        shell: pwsh
+        run: .\venv\Scripts\python.exe -m unittest tests.test_backend -v
+
+      - name: Build Windows package
+        shell: pwsh
+        run: .\packaging\build_windows.ps1
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: packaging/output/oc-modal-configurator-windows.zip
+          if-no-files-found: error
