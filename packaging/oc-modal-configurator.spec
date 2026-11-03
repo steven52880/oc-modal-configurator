@@ -40,6 +40,8 @@ if pyvenv.is_file():
 runtime_dlls = [
     "libcrypto-3-x64.dll",
     "libssl-3-x64.dll",
+    "libcrypto-3.dll",
+    "libssl-3.dll",
     "libexpat.dll",
     "liblzma.dll",
     "LIBBZ2.dll",
@@ -55,9 +57,6 @@ for runtime_dir in runtime_dirs:
         source = runtime_dir / name
         if source.is_file() and not any(Path(existing).name.lower() == name.lower() for existing, _dest in binaries):
             binaries.append((str(source), "."))
-if not any(name.lower().startswith("libssl") for source, _dest in binaries for name in [Path(source).name]):
-    raise SystemExit("OpenSSL was not found. The packaged program would be unable to download the model catalog.")
-
 hiddenimports += [
     "bottle",
     "proxy_tools",
@@ -89,6 +88,8 @@ a = Analysis(
     excludes=["tkinter"],
     noarchive=False,
 )
+if not any(name.lower().startswith("libssl") for name, _source, _kind in a.binaries):
+    raise SystemExit("OpenSSL was not found. The packaged program would be unable to download the model catalog.")
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
