@@ -18,6 +18,7 @@ DEFAULT_SETTINGS = {
     "lastConfigPath": None,
     "recentConfigPaths": [],
     "configSource": "opencode",
+    "ccswitchAcceptedSchema": None,
 }
 
 CONFIG_SOURCES = ("opencode", "ccswitch")
@@ -34,6 +35,7 @@ def _defaults() -> dict:
         "lastConfigPath": None,
         "recentConfigPaths": [],
         "configSource": DEFAULT_SETTINGS["configSource"],
+        "ccswitchAcceptedSchema": DEFAULT_SETTINGS["ccswitchAcceptedSchema"],
     }
 
 
@@ -87,6 +89,10 @@ class SettingsStore:
             current["recentConfigPaths"] = _recent(patch["recentConfigPaths"])
         if patch.get("configSource") in CONFIG_SOURCES:
             current["configSource"] = patch["configSource"]
+        if "ccswitchAcceptedSchema" in patch:
+            value = patch["ccswitchAcceptedSchema"]
+            if value is None or _schema_or_none(value) is not None:
+                current["ccswitchAcceptedSchema"] = value
         return self.save(current)
 
     def remember_config_path(self, path: str) -> dict:
@@ -133,6 +139,7 @@ def _merge(data: dict) -> dict:
         settings["recentConfigPaths"] = _recent(data["recentConfigPaths"])
     if data.get("configSource") in CONFIG_SOURCES:
         settings["configSource"] = data["configSource"]
+    settings["ccswitchAcceptedSchema"] = _schema_or_none(data.get("ccswitchAcceptedSchema"))
     settings["version"] = SETTINGS_VERSION
     return settings
 
@@ -213,3 +220,9 @@ def _recent(values: list) -> list[str]:
         if len(recent) == 8:
             break
     return recent
+
+
+def _schema_or_none(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None

@@ -66,6 +66,7 @@ export const bridge = {
   getAppInfo: () => call<AppInfo>("get_app_info", []),
   loadConfig: (path?: string | null) => call<ConfigDocument>("load_config", [path ?? null]),
   loadCcswitch: () => call<ConfigDocument>("load_ccswitch", []),
+  acceptCcswitchSchema: () => call<Settings>("accept_ccswitch_schema", []),
   saveConfig: (document: ConfigDocument, force = false) =>
     call<SaveResult>("save_config", [document, force]),
   pickConfigFile: () => call<{ path: string } | null>("pick_config_file", []),

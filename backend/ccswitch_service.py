@@ -30,7 +30,9 @@ from backend.errors import ServiceError
 from backend.jsonio import write_json
 from backend.paths import ccswitch_live_path_override, default_ccswitch_db_path
 
-SUPPORTED_SCHEMA_VERSIONS = frozenset({19, 20, 21, 22, 23})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({19, 20, 21, 22, 23, 24})
+LATEST_VERIFIED_SCHEMA = max(SUPPORTED_SCHEMA_VERSIONS)
+VERIFIED_RANGE = f"v{min(SUPPORTED_SCHEMA_VERSIONS)}–v{LATEST_VERIFIED_SCHEMA}"
 REQUIRED_COLUMNS = frozenset(
     {"id", "app_type", "name", "settings_config", "category", "created_at", "sort_index", "meta"}
 )
@@ -74,10 +76,10 @@ class CcSwitchService:
         self._live_override = Path(live_path) if live_path is not None else None
         self._running_check = running_check if running_check is not None else _default_running_check
 
-    def load(self) -> dict:
+    def load(self, accepted_schema: int | None = None) -> dict:
         db = self._require_db()
         with closing(_connect_readonly(db)) as conn:
-            version = _check_schema(conn)
+            version = _check_schema(conn, accepted_schema)
             rows = _read_rows(conn)
         live_path = self._live_path()
         live, notices = _read_live(live_path)
@@ -112,11 +114,13 @@ class CcSwitchService:
                 "notices": notices,
                 "running": self._is_running(),
                 "schemaVersion": version,
+                "verifiedSchema": LATEST_VERIFIED_SCHEMA,
+                "schemaUnverified": version not in SUPPORTED_SCHEMA_VERSIONS,
             }
         )
         return document
 
-    def save(self, document: dict, force: bool = False) -> dict:
+    def save(self, document: dict, force: bool = False, accepted_schema: int | None = None) -> dict:
         if not isinstance(document, dict) or document.get("source") != "ccswitch":
             raise ServiceError("invalid_document", "保存内容不是 CC Switch 文档")
         if self._is_running():
@@ -126,14 +130,14 @@ class CcSwitchService:
         live_path = self._live_path()
         live, original_bytes = _read_live_for_save(live_path)
         with closing(_connect_readonly(db)) as probe:
-            _check_schema(probe)
+            _check_schema(probe, accepted_schema)
         backup = _backup_db(db)
         conn = sqlite3.connect(str(db), isolation_level=None, timeout=1)
         try:
             conn.execute("PRAGMA foreign_keys=ON")
             _begin(conn)
             try:
-                _check_schema(conn)
+                _check_schema(conn, accepted_schema)
                 rows = _read_rows(conn)
                 if not force and _fingerprint(rows, live_path) != str(document.get("mtimeNs")):
                     raise ServiceError("conflict", "CC Switch 数据库或 opencode.json 已在外部被修改，请重新加载后再保存")
@@ -160,6 +164,11 @@ class CcSwitchService:
             "livePath": str(live_path),
             "liveBackupPath": None if live_backup is None else str(live_backup),
         }
+
+    def schema_version(self) -> int:
+        db = self._require_db()
+        with closing(_connect_readonly(db)) as conn:
+            return _user_version(conn)
 
     def _require_db(self) -> Path:
         if not self.db_path.is_file():
@@ -195,13 +204,27 @@ def _connect_readonly(db: Path) -> sqlite3.Connection:
     return sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
 
 
-def _check_schema(conn: sqlite3.Connection) -> int:
-    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version not in SUPPORTED_SCHEMA_VERSIONS:
+def _user_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _check_schema(conn: sqlite3.Connection, accepted_schema: int | None = None) -> int:
+    """``accepted_schema``: newest version the user chose to use without verification."""
+    version = _user_version(conn)
+    if version > LATEST_VERIFIED_SCHEMA:
+        if not (isinstance(accepted_schema, int) and version <= accepted_schema):
+            raise ServiceError(
+                "ccswitch_newer",
+                f"CC Switch 数据库版本 v{version} 高于本工具已验证的 v{LATEST_VERIFIED_SCHEMA}"
+                f"（已验证 {VERIFIED_RANGE}），可能存在不兼容的改动，已禁止读写。"
+                "可更新本工具，或在确认风险后跳过版本检查继续使用。",
+            )
+    elif version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ServiceError(
             "ccswitch_unsupported",
-            f"CC Switch 数据库版本 v{version} 尚未适配（已验证 v19–v23），为避免损坏已禁止读写。请更新本工具。",
+            f"CC Switch 数据库版本 v{version} 尚未适配（已验证 {VERIFIED_RANGE}），为避免损坏已禁止读写。请更新本工具。",
         )
+    # Runs even when the version check was skipped: this is the real safety net.
     columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(providers)").fetchall()}
     if not columns:
         raise ServiceError("ccswitch_unsupported", "CC Switch 数据库中没有 providers 表，为避免损坏已禁止读写。")

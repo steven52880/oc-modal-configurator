@@ -329,7 +329,7 @@ class BridgeTests(unittest.TestCase):
 CCSWITCH_DDL = """
 CREATE TABLE providers (id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL, settings_config TEXT NOT NULL, website_url TEXT, category TEXT, created_at INTEGER, sort_index INTEGER, notes TEXT, icon TEXT, icon_color TEXT, meta TEXT NOT NULL DEFAULT '{}', is_current BOOLEAN NOT NULL DEFAULT 0, in_failover_queue BOOLEAN NOT NULL DEFAULT 0, cost_multiplier TEXT NOT NULL DEFAULT '1.0', limit_daily_usd TEXT, limit_monthly_usd TEXT, provider_type TEXT, PRIMARY KEY (id, app_type));
 CREATE TABLE provider_endpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, url TEXT NOT NULL, added_at INTEGER, FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE);
-PRAGMA user_version = 23;
+PRAGMA user_version = 24;
 """
 
 ALPHA = {
@@ -383,10 +383,16 @@ class CcSwitchTests(unittest.TestCase):
     def provider(self, document, key):
         return next(item for item in document["providers"] if item["key"] == key)
 
+    def set_version(self, version):
+        with closing(sqlite3.connect(str(self.db))) as conn:
+            conn.execute(f"PRAGMA user_version = {int(version)}")
+
     def test_load_lists_editable_and_locks_others(self):
         document = self.service.load()
         self.assertEqual(document["source"], "ccswitch")
-        self.assertEqual(document["schemaVersion"], 23)
+        self.assertEqual(document["schemaVersion"], 24)
+        self.assertEqual(document["verifiedSchema"], 24)
+        self.assertFalse(document["schemaUnverified"])
         self.assertEqual([item["key"] for item in document["providers"]], ["alpha", "dbonly"])
         locked = {item["key"]: item["reason"] for item in document["lockedProviders"]}
         self.assertEqual(set(locked), {"omo", "v2"})
@@ -396,15 +402,63 @@ class CcSwitchTests(unittest.TestCase):
         self.assertEqual(document["livePath"], str(self.live))
 
     def test_unsupported_schema_version_blocks_load_and_save(self):
-        with closing(sqlite3.connect(str(self.db))) as conn:
-            conn.execute("PRAGMA user_version = 24")
-        with self.assertRaises(ServiceError) as caught:
-            self.service.load()
-        self.assertEqual(caught.exception.code, "ccswitch_unsupported")
-        with self.assertRaises(ServiceError) as caught:
-            self.service.save({"source": "ccswitch", "providers": [], "mtimeNs": "x"}, force=True)
-        self.assertEqual(caught.exception.code, "ccswitch_unsupported")
+        self.set_version(18)
+        # Skipping only applies to versions newer than the verified range.
+        for accepted in (None, 99):
+            with self.assertRaises(ServiceError) as caught:
+                self.service.load(accepted_schema=accepted)
+            self.assertEqual(caught.exception.code, "ccswitch_unsupported")
+            self.assertIn("v19–v24", caught.exception.message)
+            with self.assertRaises(ServiceError) as caught:
+                self.service.save(
+                    {"source": "ccswitch", "providers": [], "mtimeNs": "x"}, force=True, accepted_schema=accepted
+                )
+            self.assertEqual(caught.exception.code, "ccswitch_unsupported")
         self.assertEqual(len(self.query("SELECT id FROM providers WHERE app_type='opencode'")), 4)
+
+    def test_newer_schema_version_requires_explicit_skip(self):
+        self.set_version(25)
+        live_before = self.live.read_bytes()
+        for accepted in (None, 24):
+            with self.assertRaises(ServiceError) as caught:
+                self.service.load(accepted_schema=accepted)
+            self.assertEqual(caught.exception.code, "ccswitch_newer")
+            self.assertIn("v25", caught.exception.message)
+            with self.assertRaises(ServiceError) as caught:
+                self.service.save(
+                    {"source": "ccswitch", "providers": [], "mtimeNs": "x"}, force=True, accepted_schema=accepted
+                )
+            self.assertEqual(caught.exception.code, "ccswitch_newer")
+        self.assertEqual(len(self.query("SELECT id FROM providers WHERE app_type='opencode'")), 4)
+        self.assertEqual(self.live.read_bytes(), live_before)
+        self.assertFalse(self.db.with_name(self.db.name + ".oc-modal.bak").exists())
+        document = self.service.load(accepted_schema=25)
+        self.assertEqual(document["schemaVersion"], 25)
+        self.assertEqual(document["verifiedSchema"], 24)
+        self.assertTrue(document["schemaUnverified"])
+        self.provider(document, "alpha")["name"] = "Alpha Skipped"
+        self.service.save(document, accepted_schema=25)
+        self.assertEqual(
+            self.query("SELECT name FROM providers WHERE id='alpha' AND app_type='opencode'"), [("Alpha Skipped",)]
+        )
+        self.assertEqual(self.live_data()["provider"]["alpha"]["name"], "Alpha Skipped")
+
+    def test_skipped_version_check_still_requires_provider_columns(self):
+        db = Path(self.directory.name) / "no-meta.db"
+        with closing(sqlite3.connect(str(db))) as conn:
+            conn.executescript(
+                "CREATE TABLE providers (id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL, "
+                "settings_config TEXT NOT NULL, category TEXT, created_at INTEGER, sort_index INTEGER, "
+                "PRIMARY KEY (id, app_type));\nPRAGMA user_version = 25;"
+            )
+        service = CcSwitchService(db, self.live, lambda: False)
+        with self.assertRaises(ServiceError) as caught:
+            service.load(accepted_schema=25)
+        self.assertEqual(caught.exception.code, "ccswitch_unsupported")
+        self.assertIn("meta", caught.exception.message)
+        with self.assertRaises(ServiceError) as caught:
+            service.save({"source": "ccswitch", "providers": [], "mtimeNs": "x"}, force=True, accepted_schema=25)
+        self.assertEqual(caught.exception.code, "ccswitch_unsupported")
 
     def test_update_preserves_columns_and_writes_live(self):
         document = self.service.load()
@@ -539,6 +593,35 @@ class CcSwitchTests(unittest.TestCase):
         self.assertEqual(bridge.get_app_info()["data"]["ccswitchDbPath"], str(self.db))
         self.assertEqual(bridge.load_config(str(root / "plain.json"))["data"]["source"], "opencode")
 
+    def test_bridge_skip_version_check_is_remembered_per_version(self):
+        root = Path(self.directory.name)
+        bridge = Bridge(
+            ConfigService(root / "plain.json"),
+            MetadataService(root / "cache.json", root / "cache.meta.json"),
+            SettingsStore(root / "settings.json"),
+            self.service,
+        )
+        refused = bridge.accept_ccswitch_schema()
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["error"]["code"], "invalid_request")
+        self.set_version(25)
+        blocked = bridge.load_ccswitch()
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["error"]["code"], "ccswitch_newer")
+        accepted = bridge.accept_ccswitch_schema()
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertEqual(accepted["data"]["ccswitchAcceptedSchema"], 25)
+        self.assertEqual(bridge.get_settings()["data"]["ccswitchAcceptedSchema"], 25)
+        loaded = bridge.load_ccswitch()
+        self.assertTrue(loaded["ok"], loaded)
+        self.assertTrue(loaded["data"]["schemaUnverified"])
+        saved = bridge.save_config(loaded["data"])
+        self.assertTrue(saved["ok"], saved)
+        self.set_version(26)
+        again = bridge.load_ccswitch()
+        self.assertFalse(again["ok"])
+        self.assertEqual(again["error"]["code"], "ccswitch_newer")
+
     def test_settings_config_source(self):
         store = SettingsStore(Path(self.directory.name) / "settings.json")
         self.assertEqual(store.load()["configSource"], "opencode")
@@ -547,6 +630,20 @@ class CcSwitchTests(unittest.TestCase):
         self.assertEqual(store.update({"configSource": "bogus"})["configSource"], "ccswitch")
         (Path(self.directory.name) / "settings.json").write_text(json.dumps({"configSource": "bogus"}), encoding="utf-8")
         self.assertEqual(store.load()["configSource"], "opencode")
+
+    def test_settings_accepted_schema(self):
+        path = Path(self.directory.name) / "settings.json"
+        store = SettingsStore(path)
+        self.assertIsNone(store.load()["ccswitchAcceptedSchema"])
+        self.assertEqual(store.update({"ccswitchAcceptedSchema": 25})["ccswitchAcceptedSchema"], 25)
+        self.assertEqual(store.load()["ccswitchAcceptedSchema"], 25)
+        for bogus in ("x", True, -1, 0):
+            self.assertEqual(store.update({"ccswitchAcceptedSchema": bogus})["ccswitchAcceptedSchema"], 25)
+        self.assertEqual(store.update({"configSource": "ccswitch"})["ccswitchAcceptedSchema"], 25)
+        self.assertIsNone(store.update({"ccswitchAcceptedSchema": None})["ccswitchAcceptedSchema"])
+        self.assertIsNone(store.load()["ccswitchAcceptedSchema"])
+        path.write_text(json.dumps({"ccswitchAcceptedSchema": True}), encoding="utf-8")
+        self.assertIsNone(store.load()["ccswitchAcceptedSchema"])
 
 
 MINI_CATALOG = {

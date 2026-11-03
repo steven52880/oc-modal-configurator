@@ -87,6 +87,8 @@ export const App: React.FC = () => {
 
   const [loadingInit, setLoadingInit] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Bridge error code of the failed load; picks extra actions for the error banner
+  const [loadErrorCode, setLoadErrorCode] = useState<string | null>(null);
 
   const [dirty, setDirty] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
@@ -171,6 +173,7 @@ export const App: React.FC = () => {
   const loadConfigAtPath = useCallback(
     async (targetPath?: string | null) => {
       setLoadError(null);
+      setLoadErrorCode(null);
       try {
         const doc = await bridge.loadConfig(targetPath ?? null);
         applyLoadedDocument(doc);
@@ -180,6 +183,7 @@ export const App: React.FC = () => {
       } catch (err) {
         const msg = err instanceof Error ? err.message : "加载配置文件失败";
         setLoadError(msg);
+        setLoadErrorCode(null);
         setShowPathBar(true);
       }
     },
@@ -188,6 +192,7 @@ export const App: React.FC = () => {
 
   const loadCcswitch = useCallback(async () => {
     setLoadError(null);
+    setLoadErrorCode(null);
     try {
       const doc = await bridge.loadCcswitch();
       applyLoadedDocument(doc);
@@ -195,6 +200,7 @@ export const App: React.FC = () => {
       // Path bar does not apply to the database source
       setDocumentData(null);
       setLoadError(err instanceof Error ? err.message : "加载 CC Switch 配置失败");
+      setLoadErrorCode(err instanceof BridgeError ? err.code : null);
     }
   }, [applyLoadedDocument]);
 
@@ -241,6 +247,7 @@ export const App: React.FC = () => {
       } catch (err) {
         if (!cancelled) {
           setLoadError(err instanceof Error ? err.message : "初始化应用失败");
+          setLoadErrorCode(null);
           setShowPathBar(true);
         }
       } finally {
@@ -534,6 +541,23 @@ export const App: React.FC = () => {
       } else {
         notify(err instanceof Error ? err.message : "打开文件对话框失败", "error");
       }
+    }
+  };
+
+  // CC Switch database newer than the verified range: the user may skip the check for this version
+  const handleSkipSchemaCheck = async () => {
+    if (
+      !window.confirm(
+        "本工具尚未验证该版本的 CC Switch 数据库，跳过检查后读写可能出错。保存前会自动备份 cc-switch.db 与 opencode.json。仅对当前数据库版本生效，之后 CC Switch 再升级会重新提示。是否继续？",
+      )
+    ) {
+      return;
+    }
+    try {
+      setSettings(await bridge.acceptCcswitchSchema());
+      await loadCcswitch();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "跳过版本检查失败", "error");
     }
   };
 
@@ -1685,7 +1709,13 @@ export const App: React.FC = () => {
         const locked = documentData.lockedProviders ?? [];
         const drifted = documentData.driftedProviders ?? [];
         const notices = documentData.notices ?? [];
-        if (!documentData.running && locked.length === 0 && drifted.length === 0 && notices.length === 0) {
+        if (
+          !documentData.running &&
+          !documentData.schemaUnverified &&
+          locked.length === 0 &&
+          drifted.length === 0 &&
+          notices.length === 0
+        ) {
           return null;
         }
         return (
@@ -1693,6 +1723,11 @@ export const App: React.FC = () => {
             spacing={0.5}
             sx={{ px: 1.5, py: 0.75, borderBottom: "1px solid #cbd5e1", flexShrink: 0 }}
           >
+            {documentData.schemaUnverified && (
+              <Alert severity="warning" sx={{ py: 0 }} onClose={() => setCcswitchNoticesOpen(false)}>
+                已跳过版本检查：CC Switch 数据库为 v{documentData.schemaVersion}，本工具仅验证到 v{documentData.verifiedSchema}。如遇异常请更新本工具。
+              </Alert>
+            )}
             {documentData.running && (
               <Alert severity="warning" sx={{ py: 0 }} onClose={() => setCcswitchNoticesOpen(false)}>
                 检测到 CC Switch 正在运行，保存前请完全退出 CC Switch（包括托盘）
@@ -1729,13 +1764,25 @@ export const App: React.FC = () => {
           severity="error"
           sx={{ m: 1.5, flexShrink: 0 }}
           action={
-            <Button
-              color="inherit"
-              size="small"
-              onClick={() => void reloadCurrent(pathInput || null)}
-            >
-              重试加载
-            </Button>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Button
+                color="inherit"
+                size="small"
+                onClick={() => void reloadCurrent(pathInput || null)}
+              >
+                重试加载
+              </Button>
+              {configSource === "ccswitch" && loadErrorCode === "ccswitch_newer" && (
+                <Button
+                  color="inherit"
+                  size="small"
+                  variant="outlined"
+                  onClick={() => void handleSkipSchemaCheck()}
+                >
+                  跳过版本检查并继续
+                </Button>
+              )}
+            </Stack>
           }
         >
           {configSource === "ccswitch" ? "加载 CC Switch 配置失败：" : "加载配置文件失败："}

@@ -10,6 +10,7 @@ PUBLIC_METHODS = (
     "load_config",
     "save_config",
     "load_ccswitch",
+    "accept_ccswitch_schema",
     "pick_config_file",
     "get_metadata_status",
     "refresh_metadata",

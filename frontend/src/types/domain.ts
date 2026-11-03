@@ -65,6 +65,8 @@ export interface Settings {
   lastConfigPath: string | null;
   recentConfigPaths: string[];
   configSource: ConfigSource;
+  /** Newest CC Switch database version the user chose to use without verification. */
+  ccswitchAcceptedSchema: number | null;
 }
 
 export interface HeaderMap {
@@ -171,6 +173,10 @@ export interface ConfigDocument {
   notices?: string[];
   running?: boolean;
   schemaVersion?: number;
+  /** ccswitch only: newest database version this tool has verified. */
+  verifiedSchema?: number;
+  /** ccswitch only: schemaVersion is newer than verifiedSchema and the user skipped the check. */
+  schemaUnverified?: boolean;
 }
 
 export interface SaveResult {

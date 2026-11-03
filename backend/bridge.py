@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 
 from backend import __version__
-from backend.ccswitch_service import CcSwitchService
+from backend.ccswitch_service import LATEST_VERIFIED_SCHEMA, CcSwitchService
 from backend.config_service import ConfigService
 from backend.errors import ServiceError
 from backend.metadata_service import MetadataService
@@ -47,7 +47,10 @@ class Bridge:
         return self._call(lambda: self._save_config(document, bool(force)))
 
     def load_ccswitch(self) -> dict:
-        return self._call(self._ccswitch.load)
+        return self._call(lambda: self._ccswitch.load(self._accepted_schema()))
+
+    def accept_ccswitch_schema(self) -> dict:
+        return self._call(self._accept_ccswitch_schema)
 
     def pick_config_file(self) -> dict:
         return self._call(self._pick_config_file)
@@ -123,11 +126,23 @@ class Bridge:
 
     def _save_config(self, document: dict, force: bool) -> dict:
         if isinstance(document, dict) and document.get("source") == "ccswitch":
-            return self._ccswitch.save(document, force)
+            return self._ccswitch.save(document, force, self._accepted_schema())
         saved = self._config.save(document, force)
         with self._lock:
             self._settings.remember_config_path(saved["path"])
         return saved
+
+    def _accepted_schema(self) -> int | None:
+        with self._lock:
+            return self._settings.load().get("ccswitchAcceptedSchema")
+
+    def _accept_ccswitch_schema(self) -> dict:
+        # The version comes from the database itself, never from the client.
+        version = self._ccswitch.schema_version()
+        if version <= LATEST_VERIFIED_SCHEMA:
+            raise ServiceError("invalid_request", "当前数据库版本已验证，无需跳过检查")
+        with self._lock:
+            return self._settings.update({"ccswitchAcceptedSchema": version})
 
     def _resolve_path(self, path: str | None) -> Path | None:
         if isinstance(path, str) and path.strip():
