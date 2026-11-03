@@ -96,6 +96,8 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(Path(backed_up["backupPath"]).is_file())
             document["mtimeNs"] = backed_up["mtimeNs"]
             path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            stat = path.stat()
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
             with self.assertRaises(Exception) as caught:
                 service.save(document)
             self.assertEqual(caught.exception.code, "conflict")
