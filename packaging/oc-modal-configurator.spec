@@ -27,14 +27,15 @@ for package in ("webview", "clr_loader", "pythonnet"):
     binaries += package_binaries
     hiddenimports += package_hidden
 
-# A conda-based Python does not put OpenSSL next to python.exe. Copy the
-# libraries HTTPS needs so the folder still works on a PC without conda.
-conda_bin = None
+# Copy HTTPS runtime libraries from either a standard Python installation or
+# a conda-based Python so the folder works without the build environment.
+python_home = Path(sys.base_prefix)
+runtime_dirs = [python_home / "DLLs", python_home / "Library" / "bin"]
 pyvenv = Path(sys.prefix) / "pyvenv.cfg"
 if pyvenv.is_file():
     for line in pyvenv.read_text(encoding="utf-8").splitlines():
         if line.lower().startswith("home"):
-            conda_bin = Path(line.split("=", 1)[1].strip()) / "Library" / "bin"
+            runtime_dirs.append(Path(line.split("=", 1)[1].strip()) / "Library" / "bin")
             break
 runtime_dlls = [
     "libcrypto-3-x64.dll",
@@ -46,11 +47,13 @@ runtime_dlls = [
     # _sqlite3.pyd links against it; the CC Switch source reads cc-switch.db.
     "sqlite3.dll",
 ]
-if conda_bin is not None and conda_bin.is_dir():
-    runtime_dlls += [path.name for path in conda_bin.glob("zlib*.dll")]
-    for name in runtime_dlls:
-        source = conda_bin / name
-        if source.is_file():
+for runtime_dir in runtime_dirs:
+    if not runtime_dir.is_dir():
+        continue
+    names = runtime_dlls + [path.name for path in runtime_dir.glob("zlib*.dll")]
+    for name in names:
+        source = runtime_dir / name
+        if source.is_file() and not any(Path(existing).name.lower() == name.lower() for existing, _dest in binaries):
             binaries.append((str(source), "."))
 if not any(name.lower().startswith("libssl") for source, _dest in binaries for name in [Path(source).name]):
     raise SystemExit("OpenSSL was not found. The packaged program would be unable to download the model catalog.")
