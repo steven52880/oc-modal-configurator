@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import shutil
 from pathlib import Path
 
@@ -13,8 +14,12 @@ from backend.fields import (
     PROVIDER_OPTION_KEYS,
     TIMEOUT_KEYS,
     coerce_headers,
+    denormalize_cache,
     denormalize_interleaved,
+    empty_cache,
+    normalize_cache,
     normalize_interleaved,
+    validate_cache,
     optional_bool,
     optional_number,
     optional_str,
@@ -23,6 +28,12 @@ from backend.fields import (
 )
 from backend.jsonio import read_json, write_json
 from backend.paths import default_opencode_path
+from backend.version import opencode_runtime
+
+
+def raw_format(document: dict) -> str:
+    fmt = document.get("format", "v1")
+    return fmt if fmt in ("v1", "v2") else "v1"
 
 
 class ConfigService:
@@ -61,23 +72,56 @@ class ConfigService:
             "path": str(target),
             "backupPath": None if backup is None else str(backup),
             "mtimeNs": str(target.stat().st_mtime_ns),
+            "format": raw_format(document),
         }
 
 
-def document_from_raw(raw: dict, path: Path, exists: bool, mtime_ns: int | None) -> dict:
-    providers_raw = raw.get("provider", {}) if exists or "provider" in raw else {}
+def detect_format(raw: dict, runtime: dict) -> tuple[str, str]:
+    if isinstance(raw.get("providers"), dict):
+        return "v2", "file"
+    if isinstance(raw.get("provider"), dict):
+        return "v1", "file"
+    major = (runtime or {}).get("major")
+    if isinstance(major, int) and not isinstance(major, bool):
+        if major >= 2:
+            return "v2", "runtime"
+        if major == 1:
+            return "v1", "runtime"
+    return "v1", "default"
+
+
+def _container_key(fmt: str) -> str:
+    return "providers" if fmt == "v2" else "provider"
+
+
+def document_from_raw(
+    raw: dict,
+    path: Path,
+    exists: bool,
+    mtime_ns: int | None,
+    runtime: dict | None = None,
+) -> dict:
+    if runtime is None:
+        runtime = opencode_runtime()
+    runtime = dict(runtime)
+    fmt, fmt_source = detect_format(raw, runtime)
+    container = _container_key(fmt)
+    providers_raw = raw.get(container, {})
     if providers_raw is None:
         providers_raw = {}
     if not isinstance(providers_raw, dict):
-        raise ServiceError("invalid_json", "provider 必须是对象")
-    preserved = {key: value for key, value in raw.items() if key != "provider"}
+        raise ServiceError("invalid_json", f"{container} 必须是对象")
+    preserved = {key: value for key, value in raw.items() if key != container}
     return {
         "source": "opencode",
         "path": str(path),
         "exists": exists,
         "mtimeNs": None if mtime_ns is None else str(mtime_ns),
+        "format": fmt,
+        "formatSource": fmt_source,
+        "opencode": runtime,
         "preserved": preserved,
-        "providers": [_normalize_provider(str(key), value) for key, value in providers_raw.items()],
+        "providers": [_normalize_provider(str(key), value, fmt) for key, value in providers_raw.items()],
     }
 
 
@@ -88,8 +132,12 @@ def to_raw(document: dict) -> dict:
     providers = document.get("providers")
     if not isinstance(providers, list):
         raise ServiceError("invalid_document", "providers 必须是数组")
+    fmt = document.get("format", "v1")
+    if fmt not in ("v1", "v2"):
+        raise ServiceError("invalid_document", "format 必须是 v1 或 v2")
+    container = _container_key(fmt)
     raw = dict(preserved)
-    raw.pop("provider", None)
+    raw.pop(container, None)
     body: dict = {}
     for provider in providers:
         if not isinstance(provider, dict):
@@ -97,33 +145,42 @@ def to_raw(document: dict) -> dict:
         key = _required_key(provider.get("key"), "提供商标识符")
         if key in body:
             raise ServiceError("validation_error", f"提供商标识符重复：{key}")
-        body[key] = _provider_to_raw(provider)
-    raw["provider"] = body
+        body[key] = _provider_to_raw(provider, fmt)
+    raw[container] = body
     return raw
 
 
-def _normalize_provider(key: str, value: object) -> dict:
+def _normalize_provider(key: str, value: object, fmt: str = "v1") -> dict:
     if not isinstance(value, dict):
         raise ServiceError("invalid_json", f"提供商 {key} 必须是对象")
-    options = value.get("options")
+    v2 = fmt == "v2"
+    options_key = "settings" if v2 else "options"
+    options = value.get(options_key)
     if options is None:
         options = {}
     if not isinstance(options, dict):
-        raise ServiceError("invalid_json", f"提供商 {key} 的 options 必须是对象")
+        raise ServiceError("invalid_json", f"提供商 {key} 的 {options_key} 必须是对象")
     models = value.get("models", {})
     if models is None:
         models = {}
     if not isinstance(models, dict):
         raise ServiceError("invalid_json", f"提供商 {key} 的 models 必须是对象")
+    if v2 and "headers" in value:
+        options = {**options, "headers": value.get("headers")}
     known, extra = _split_provider_options(options)
+    npm_key = "package" if v2 else "npm"
+    consumed = {"name", npm_key, options_key, "models"}
+    if v2:
+        consumed.add("headers")
+    normalize_model = _normalize_model_v2 if v2 else _normalize_model
     return {
         "key": key,
         "name": optional_str(value.get("name")) if "name" in value else None,
-        "npm": optional_str(value.get("npm")) if "npm" in value else None,
+        "npm": optional_str(value.get(npm_key)) if npm_key in value else None,
         "options": known,
         "optionsExtra": extra,
-        "extra": {item_key: item for item_key, item in value.items() if item_key not in {"name", "npm", "options", "models"}},
-        "models": [_normalize_model(str(model_key), model) for model_key, model in models.items()],
+        "extra": {item_key: item for item_key, item in value.items() if item_key not in consumed},
+        "models": [normalize_model(str(model_key), model) for model_key, model in models.items()],
     }
 
 
@@ -165,6 +222,8 @@ def _normalize_model(key: str, value: object) -> dict:
     modalities = value.get("modalities") if "modalities" in value else None
     if modalities is not None and not isinstance(modalities, dict):
         raise ServiceError("invalid_json", f"模型 {key} 的 modalities 必须是对象")
+    options = _object(value.get("options"), "options") if "options" in value else {}
+    options, cache = _split_cache(options)
     return {
         "key": key,
         "name": optional_str(value.get("name")) if "name" in value else None,
@@ -182,13 +241,177 @@ def _normalize_model(key: str, value: object) -> dict:
             "output": string_list(modalities.get("output")),
         },
         "variants": _normalize_variants(value.get("variants")) if "variants" in value else {},
+        "variantExtras": {},
         "cost": _normalize_cost(value.get("cost")) if "cost" in value else _empty_cost(),
-        "options": _object(value.get("options"), "options") if "options" in value else {},
+        "options": options,
+        "cache": cache,
         "headers": coerce_headers(value.get("headers")) if "headers" in value else {},
         "provider": _normalize_model_provider(value.get("provider")) if "provider" in value else _empty_model_provider(),
         "meta": {item: value.get(item) if item in value else None for item in META_KEYS},
         "extra": {item_key: item for item_key, item in value.items() if item_key not in consumed},
     }
+
+
+def _split_cache(options: dict) -> tuple[dict, dict]:
+    """Move a well-formed `cache` out of options; leave anything odd untouched."""
+    if "cache" not in options:
+        return options, empty_cache()
+    cache, fits = normalize_cache(options["cache"])
+    if not fits:
+        return options, empty_cache()
+    return {key: item for key, item in options.items() if key != "cache"}, cache
+
+
+def _options_to_raw(model: dict) -> dict:
+    options = model.get("options") or {}
+    if not isinstance(options, dict):
+        raise ServiceError("invalid_document", "模型 options 必须是对象")
+    options = dict(options)
+    cache = model.get("cache")
+    validate_cache(cache)
+    encoded = denormalize_cache(cache)
+    if encoded is not None:
+        options["cache"] = encoded
+    return options
+
+
+_V2_MODEL_CONSUMED = {
+    "name",
+    "modelID",
+    "capabilities",
+    "compatibility",
+    "variants",
+    "cost",
+    "settings",
+    "headers",
+    "package",
+    "family",
+    "releaseDate",
+}
+
+
+def _normalize_model_v2(key: str, value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ServiceError("invalid_json", f"模型 {key} 必须是对象")
+    extra = {k: v for k, v in value.items() if k not in _V2_MODEL_CONSUMED}
+    caps = value.get("capabilities") if "capabilities" in value else None
+    if caps is not None and not isinstance(caps, dict):
+        raise ServiceError("invalid_json", f"模型 {key} 的 capabilities 必须是对象")
+    caps_extra = copy.deepcopy(caps) if caps else {}
+    tools = optional_bool(caps_extra.pop("tools")) if "tools" in caps_extra else None
+    temperature = optional_bool(caps_extra.pop("temperature")) if "temperature" in caps_extra else None
+    cap_in = caps_extra.pop("input") if "input" in caps_extra else None
+    cap_out = caps_extra.pop("output") if "output" in caps_extra else None
+    reasoning = None
+    reasoning_raw = caps_extra.get("reasoning")
+    if isinstance(reasoning_raw, dict):
+        if "supported" in reasoning_raw:
+            reasoning = optional_bool(reasoning_raw.pop("supported"))
+        if not reasoning_raw:
+            caps_extra.pop("reasoning")
+    modalities = None
+    attachment = None
+    if cap_in is not None or cap_out is not None:
+        modalities = {"input": string_list(cap_in), "output": string_list(cap_out)}
+        if cap_in is not None:
+            attachment = any(item in ("image", "pdf", "audio", "video") for item in modalities["input"])
+    if caps_extra:
+        extra["capabilities"] = caps_extra
+    interleaved = None
+    compat = copy.deepcopy(value.get("compatibility")) if "compatibility" in value else None
+    if isinstance(compat, dict):
+        field = compat.get("reasoningField")
+        if isinstance(field, str) and field.strip():
+            interleaved = field.strip()
+            compat.pop("reasoningField")
+        if compat:
+            extra["compatibility"] = compat
+    elif "compatibility" in value:
+        extra["compatibility"] = compat
+    variants: dict = {}
+    variant_extras: dict = {}
+    if "variants" in value:
+        parsed = _variants_from_array(value.get("variants"))
+        if parsed is None:
+            extra["variants"] = value.get("variants")
+        else:
+            variants, variant_extras = parsed
+    cost = _empty_cost()
+    if "cost" in value:
+        raw_cost = value.get("cost")
+        if isinstance(raw_cost, dict):
+            cost = _normalize_cost_v2(raw_cost)
+        else:
+            extra["cost"] = raw_cost
+    settings = _object(value.get("settings"), "settings") if "settings" in value else {}
+    settings, cache = _split_cache(settings)
+    package = optional_str(value.get("package")) if "package" in value else None
+    meta = {item: None for item in META_KEYS}
+    if "family" in value:
+        meta["family"] = value["family"]
+    if "releaseDate" in value:
+        meta["release_date"] = value["releaseDate"]
+    return {
+        "key": key,
+        "name": optional_str(value.get("name")) if "name" in value else None,
+        "id": optional_str(value.get("modelID")) if "modelID" in value else None,
+        "attachment": attachment,
+        "tool_call": tools,
+        "reasoning": reasoning,
+        "temperature": temperature,
+        "interleaved": interleaved,
+        "limit": _normalize_limit(value.get("limit")) if "limit" in value else _empty_limit(),
+        "modalities": modalities,
+        "variants": variants,
+        "variantExtras": variant_extras,
+        "cost": cost,
+        "options": settings,
+        "cache": cache,
+        "headers": coerce_headers(value.get("headers")) if "headers" in value else {},
+        "provider": {"npm": package, "api": None, "extra": {}},
+        "meta": meta,
+        "extra": extra,
+    }
+
+
+def _normalize_cost_v2(value: dict) -> dict:
+    extra = {k: v for k, v in value.items() if k not in ("input", "output", "cache")}
+    cache = value.get("cache") if "cache" in value else None
+    read = write = None
+    if isinstance(cache, dict):
+        read = optional_number(cache.get("read")) if "read" in cache else None
+        write = optional_number(cache.get("write")) if "write" in cache else None
+        rest = {k: v for k, v in cache.items() if k not in ("read", "write")}
+        if rest:
+            extra["cache"] = rest
+    elif "cache" in value:
+        extra["cache"] = cache
+    return {
+        "input": optional_number(value.get("input")) if "input" in value else None,
+        "output": optional_number(value.get("output")) if "output" in value else None,
+        "cache_read": read,
+        "cache_write": write,
+        "extra": extra,
+    }
+
+
+def _variants_from_array(value: object) -> tuple[dict, dict] | None:
+    if not isinstance(value, list):
+        return None
+    variants: dict = {}
+    extras: dict = {}
+    for item in value:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
+            return None
+        name = item["id"].strip()
+        settings = item.get("settings", {})
+        if name in variants or not isinstance(settings, dict):
+            return None
+        variants[name] = settings
+        rest = {k: v for k, v in item.items() if k not in ("id", "settings")}
+        if rest:
+            extras[name] = rest
+    return variants, extras
 
 
 def _empty_limit() -> dict:
@@ -255,13 +478,16 @@ def _normalize_model_provider(value: object) -> dict:
     }
 
 
-def _provider_to_raw(provider: dict) -> dict:
+def _provider_to_raw(provider: dict, fmt: str = "v1") -> dict:
+    v2 = fmt == "v2"
     raw = _object(provider.get("extra"), "提供商 extra")
     _put_text(raw, "name", provider.get("name"))
-    _put_text(raw, "npm", provider.get("npm"))
+    _put_text(raw, "package" if v2 else "npm", provider.get("npm"))
     options = _provider_options_to_raw(provider)
+    if v2 and "headers" in options:
+        raw["headers"] = options.pop("headers")
     if options:
-        raw["options"] = options
+        raw["settings" if v2 else "options"] = options
     models = provider.get("models")
     if not isinstance(models, list):
         raise ServiceError("invalid_document", "models 必须是数组")
@@ -272,7 +498,7 @@ def _provider_to_raw(provider: dict) -> dict:
         key = _required_key(model.get("key"), "模型标识符")
         if key in body:
             raise ServiceError("validation_error", f"模型标识符重复：{key}")
-        body[key] = _model_to_raw(model)
+        body[key] = _model_to_raw_v2(model) if v2 else _model_to_raw(model)
     raw["models"] = body
     return raw
 
@@ -324,10 +550,8 @@ def _model_to_raw(model: dict) -> dict:
     cost = _cost_to_raw(model.get("cost"))
     if cost:
         raw["cost"] = cost
-    options = model.get("options") or {}
+    options = _options_to_raw(model)
     if options:
-        if not isinstance(options, dict):
-            raise ServiceError("invalid_document", "模型 options 必须是对象")
         raw["options"] = options
     headers = coerce_headers(model.get("headers"))
     if headers:
@@ -342,6 +566,99 @@ def _model_to_raw(model: dict) -> dict:
         if meta.get(key) is not None:
             raw[key] = meta[key]
     return raw
+
+
+def _model_to_raw_v2(model: dict) -> dict:
+    raw = copy.deepcopy(_object(model.get("extra"), "模型 extra"))
+    _put_text(raw, "name", model.get("name"))
+    _put_text(raw, "modelID", model.get("id"))
+    caps = raw.get("capabilities")
+    caps = caps if isinstance(caps, dict) else {}
+    for src, dst in (("tool_call", "tools"), ("temperature", "temperature")):
+        if model.get(src) is not None:
+            caps[dst] = bool(model[src])
+    if model.get("reasoning") is not None:
+        reasoning = caps.get("reasoning")
+        reasoning = reasoning if isinstance(reasoning, dict) else {}
+        reasoning["supported"] = bool(model["reasoning"])
+        caps["reasoning"] = reasoning
+    modalities = model.get("modalities")
+    if isinstance(modalities, dict):
+        incoming = string_list(modalities.get("input"))
+        outgoing = string_list(modalities.get("output"))
+        if incoming:
+            caps["input"] = incoming
+        if outgoing:
+            caps["output"] = outgoing
+    if caps:
+        raw["capabilities"] = caps
+    field = normalize_interleaved(model.get("interleaved"))
+    if isinstance(field, str):
+        compat = raw.get("compatibility")
+        compat = compat if isinstance(compat, dict) else {}
+        compat["reasoningField"] = field
+        raw["compatibility"] = compat
+    limit = _limit_to_raw(model.get("limit"))
+    if limit:
+        raw["limit"] = limit
+    variants = _normalize_variants(model.get("variants"))
+    if variants:
+        extras = model.get("variantExtras") or {}
+        if not isinstance(extras, dict):
+            raise ServiceError("invalid_document", "variantExtras 必须是对象")
+        items = []
+        for name, settings in variants.items():
+            item: dict = {"id": name}
+            if settings:
+                item["settings"] = settings
+            extra = extras.get(name)
+            if isinstance(extra, dict):
+                for key, value in extra.items():
+                    if key not in ("id", "settings"):
+                        item[key] = value
+            items.append(item)
+        raw["variants"] = items
+    if not isinstance(raw.get("cost"), list):
+        cost = _cost_to_raw_v2(model.get("cost"))
+        if cost:
+            raw["cost"] = cost
+    settings = _options_to_raw(model)
+    if settings:
+        raw["settings"] = settings
+    headers = coerce_headers(model.get("headers"))
+    if headers:
+        raw["headers"] = headers
+    provider = model.get("provider")
+    if isinstance(provider, dict):
+        _put_text(raw, "package", provider.get("npm"))
+    meta = model.get("meta") or {}
+    if not isinstance(meta, dict):
+        raise ServiceError("invalid_document", "meta 必须是对象")
+    if meta.get("family") is not None:
+        raw["family"] = meta["family"]
+    if meta.get("release_date") is not None:
+        raw["releaseDate"] = meta["release_date"]
+    return raw
+
+
+def _cost_to_raw_v2(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    raw = _object(value.get("extra"), "cost.extra")
+    for key in ("input", "output"):
+        number = optional_number(value.get(key))
+        if number is not None:
+            raw[key] = number
+    cache = raw.get("cache")
+    cache = dict(cache) if isinstance(cache, dict) else ({} if "cache" not in raw else None)
+    if cache is not None:
+        for src, dst in (("cache_read", "read"), ("cache_write", "write")):
+            number = optional_number(value.get(src))
+            if number is not None:
+                cache[dst] = number
+        if cache:
+            raw["cache"] = cache
+    return raw or None
 
 
 def _limit_to_raw(value: object) -> dict | None:

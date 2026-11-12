@@ -102,17 +102,22 @@ OpenCode 的核心配置文件 `opencode.json` 承载了多个 AI 服务提供�
    - `options.headers`：动态键值对列表编辑器（支持增删行，批量模式下支持保留 `<...>` 混合状态或统一覆盖）；
    - `optionsExtra`：多行 JSON 代码框（带实时语法校验，用于编辑除标准字段外的其它 `options` 属性）。
 
-#### 模型折叠面板（3 个）
+#### 模型折叠面板（4 个）
 
 1. **推理参数与思考配置 (`options` & `interleaved`)**：
    - `默认推理强度 (options.reasoningEffort)`：`未设置 / none / minimal / low / medium / high / xhigh / max`；
    - `输出详略度 (options.textVerbosity)`：`未设置 / low / medium / high`；
    - `流式交错思考字段 (interleaved)`：`未设置 / false / true / reasoning_content / reasoning / reasoning_text`（底层自动在布尔值与 `{"field": "..."}` 对象间转换）；
    - `思考预算 (options.thinking.budgetTokens)`：数字输入框。
-2. **最大输入限制与计费价格 (`limit.input` & `cost`)**：
+2. **提示缓存 (`options.cache` / `settings.cache`)**：
+   - `缓存时长 (cache.ttl)`：`未设置（继承） / 5m / 1h / 自定义`；只接受紧凑写法 `ms/s/m/h/d`，其它写法在确认时直接报错；
+   - `会话预热 (cache.warming)`：`未设置 / 关闭（false） / 开启（true） / 自定义`；自定义时分别填写 `间隔 (interval)` 与 `窗口 (duration)`，留空表示使用 opencode 默认值；
+   - `间隔` 还接受 `auto`；两者都必须写成 `"4 minutes"`、`"1 hour"` 这类带单位的完整形式，写成 `1h`、`5m` 会被 opencode 静默忽略，因此保存前拦截；
+   - 未设置时不写入任何键（继承提供商或 opencode 默认，Anthropic 为 5 分钟）；协议不是 `@ai-sdk/anthropic` 且设置了 ttl 时，面板内展示字段走向警告。
+3. **最大输入限制与计费价格 (`limit.input` & `cost`)**：
    - `最大输入限制 (limit.input)`：数字输入框 + 默认值胶囊；
    - `计费价格 (cost.input / output / cache_read / cache_write)`：双列宽松网格布局，带 `$/1M` 单位前缀与官方默认价格一键填入胶囊。
-3. **单模型驱动覆盖、请求头 (`headers`) 与高级 JSON**：
+4. **单模型驱动覆盖、请求头 (`headers`) 与高级 JSON**：
    - `单模型驱动包覆盖 (provider.npm)`：允许在同一提供商下为个别模型单独指定 `@ai-sdk/openai` 或 `@ai-sdk/openai-compatible`；
    - `单模型端点覆盖 (provider.api)` 与 `底层映射 ID (id)`；
    - `模型专属请求头 (headers)`：键值对列表编辑器；

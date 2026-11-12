@@ -63,16 +63,19 @@ flowchart TB
 为了实现「表单易用性」与「底层 JSON 无损保留」的统一，`config_service.py` 在加载和保存时执行双向规范化转换：
 
 - **加载 (`document_from_raw`)**：
-  1. 提取顶层除 `provider` 以外的所有键值存入 `document.preserved`；
-  2. 将 `provider` 字典转换为有序列表 `providers: list[ProviderEntry]`，每个条目将已知配置项（`name`、`npm`、`options.baseURL` 等）提取为结构化字段，其余未知属性分别存入 `provider.extra` 和 `provider.optionsExtra`；
-  3. 将每个提供商下的 `models` 字典转换为有序列表 `models: list[ModelEntry]`，未知属性分别存入 `model.extra`、`limit.extra`、`cost.extra`、`model.provider.extra`；
-  4. 将 `interleaved` 字段规范化：文件中的 `{"field": "reasoning_content"}` 在前端领域模型中统一表示为字符串 `"reasoning_content"`，布尔值保持 `True`/`False`。
-  5. 记录当前文件纳秒级修改时间 `mtimeNs`（以字符串传输，避免 JavaScript `Number` 53 位精度丢失）。
+  1. `detect_format` 决定文件格式：存在 `providers` 对象即 V2，存在 `provider` 对象即 V1；都没有时按本机 `opencode --version` 的主版本推断（未安装则回退 V1）。结果写入 `document.format`、`document.formatSource`，运行时信息写入 `document.opencode`；
+  2. 提取顶层除当前格式容器以外的所有键值存入 `document.preserved`（若文件同时存在 `provider` 与 `providers`，非当前格式的那个原样保留，绝不被改写）；
+  3. 将容器字典转换为有序列表 `providers: list[ProviderEntry]`：V1 读 `npm`/`options`，V2 读 `package`/`settings`，两者都映射到统一的 `ProviderEntry`；其余未知属性分别存入 `provider.extra` 和 `provider.optionsExtra`；
+  4. 将每个提供商下的 `models` 字典转换为有序列表 `models: list[ModelEntry]`；V2 额外做字段映射：`modelID`→`id`、`capabilities.tools`→`tool_call`、`capabilities.temperature`→`temperature`、`capabilities.reasoning.supported`→`reasoning`、`capabilities.input/output`→`modalities`、`family`/`releaseDate`→`meta`、`compatibility.reasoningField`→`interleaved`、模型级 `package`→`provider.npm`；`attachment` 由 `capabilities.input` 是否含非纯文本类型推导（V2 不写回）。V2 的 `variants` 数组在内存中表示为字典，每个变体除 `settings` 外的键（`headers`/`body` 等）存入 `variantExtras`；嵌套 `cost` 摊平为 `cache_read`/`cache_write`，数组形式的 `cost` 原样留在 `extra`；
+  5. 将 `interleaved` 字段规范化：文件中的 `{"field": "reasoning_content"}` 在前端领域模型中统一表示为字符串 `"reasoning_content"`，布尔值保持 `True`/`False`；
+  6. 将模型自己的 `cache`（V1 在 `options.cache`，V2 在 `settings.cache`）提升为结构化字段 `model.cache = {ttl, warming}`；结构不符的值原样保留在 `optionsExtra`/`settingsExtra`，不在加载时报错；
+  7. 记录当前文件纳秒级修改时间 `mtimeNs`（以字符串传输，避免 JavaScript `Number` 53 位精度丢失）。
 - **保存 (`to_raw`)**：
-  1. 校验 `document.preserved` 存在，校验所有提供商 `key` 与同一提供商下模型 `key` 的非空与唯一性；
-  2. 比对磁盘文件的 `st_mtime_ns` 与传入的 `document.mtimeNs`（若不一致且 `force=False`，抛出 `ServiceError("conflict", ...)`）；
-  3. 将各级 `extra` / `optionsExtra` 作为基底字典，再将结构化字段写回（**结构化字段优先级高于高级 JSON 文本框**；值为 `None` 或空字符串的字段自动省略，避免污染配置文件）；
-  4. 若原文件存在，先拷贝生成 `.bak`，再通过 `jsonio.write_json` 写入 `.tmp` 并原子替换目标文件，最后返回新的 `mtimeNs`。
+  1. 校验 `document.preserved` 存在、`document.format` 合法，校验所有提供商 `key` 与同一提供商下模型 `key` 的非空与唯一性；
+  2. 校验 `model.cache`：`ttl` 必须匹配紧凑写法，预热 `interval`/`duration` 必须是带单位的完整写法（`interval` 另可 `auto`），不合法则抛 `ServiceError("validation_error", ...)`；
+  3. 比对磁盘文件的 `st_mtime_ns` 与传入的 `document.mtimeNs`（若不一致且 `force=False`，抛出 `ServiceError("conflict", ...)`）；
+  4. 将各级 `extra` / `optionsExtra` 作为基底字典，再将结构化字段写回（**结构化字段优先级高于高级 JSON 文本框**；值为 `None` 或空字符串的字段自动省略，避免污染配置文件）；容器键严格沿用加载时的格式，绝不新增另一种格式的容器；
+  5. 若原文件存在，先拷贝生成 `.bak`，再通过 `jsonio.write_json` 写入 `.tmp` 并原子替换目标文件，最后返回新的 `mtimeNs` 与 `format`。
 
 ### 3.2 可扩展模型库与默认值匹配算法 (`backend/metadata_service.py`)
 

@@ -58,6 +58,40 @@ import { MONOSPACE_FONT } from "../theme";
 export type ModelColumnId = (typeof MODEL_COLUMN_IDS)[number];
 type InlineColumnId = "key" | "context" | "output" | "npm";
 
+/** 只读的提示缓存列：仅展示，编辑入口在详情弹窗的「提示缓存 (cache)」分组。 */
+const CACHE_COLUMN_WIDTH = 64;
+const CACHE_COLUMN_LABEL = "缓存";
+
+function describeCache(model: ModelEntry): { short: string; full: string } {
+  const cache = model.cache;
+  const ttl = cache?.ttl ?? null;
+  const warming = cache?.warming ?? null;
+  if (!ttl && warming === null) {
+    return { short: "", full: "未设置：继承提供商，或使用 opencode 默认（Anthropic 为 5 分钟）" };
+  }
+  let warmingShort = "";
+  let warmingFull = "";
+  if (warming === true) {
+    warmingShort = "·预热";
+    warmingFull = "预热：开启（自动间隔）";
+  } else if (warming === false) {
+    warmingShort = "·关";
+    warmingFull = "预热：关闭";
+  } else if (warming && typeof warming === "object") {
+    warmingShort = "·预热";
+    const parts = [
+      warming.interval ? `间隔 ${warming.interval}` : null,
+      warming.duration ? `窗口 ${warming.duration}` : null,
+    ].filter(Boolean);
+    warmingFull = `预热：${parts.length > 0 ? parts.join("，") : "自定义（默认间隔）"}`;
+  }
+  const short = `${ttl ?? ""}${warmingShort}` || "—";
+  const full = [ttl ? `缓存时长：${ttl}` : "缓存时长：未设置（继承默认）", warmingFull]
+    .filter(Boolean)
+    .join("；");
+  return { short, full };
+}
+
 const DEFAULT_MODEL_WIDTHS: Record<ModelColumnId, number> = {
   key: 240,
   context: 110,
@@ -561,6 +595,11 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                   </TableCell>
                 );
               })}
+              <TableCell sx={{ width: CACHE_COLUMN_WIDTH, minWidth: CACHE_COLUMN_WIDTH, textAlign: "center" }}>
+                <Tooltip title="本机配置的提示缓存 TTL 与预热；在模型详情弹窗的「提示缓存 (cache)」分组修改">
+                  <span>{CACHE_COLUMN_LABEL}</span>
+                </Tooltip>
+              </TableCell>
               <TableCell sx={{ width: 76, textAlign: "center" }}>操作</TableCell>
             </TableRow>
           </TableHead>
@@ -1066,6 +1105,52 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                                 sx={{ color: override ? "text.primary" : "text.disabled" }}
                               >
                                 {displayNpm(shown)}
+                              </Box>
+                            </Tooltip>
+                          )}
+                        </TableCell>
+                      );
+                    })()}
+
+                    {/* Column: cache (只读) */}
+                    {(() => {
+                      const { short, full } = describeCache(model);
+                      return (
+                        <TableCell
+                          data-cache-cell="true"
+                          data-row-id={model.key}
+                          sx={{
+                            textAlign: "center",
+                            fontFamily: MONOSPACE_FONT,
+                            fontSize: "0.72rem",
+                            py: 0.25,
+                            px: 0.5,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {short ? (
+                            <Tooltip title={full}>
+                              <Chip
+                                label={short}
+                                size="small"
+                                sx={{
+                                  height: 18,
+                                  fontSize: "0.68rem",
+                                  fontFamily: MONOSPACE_FONT,
+                                  backgroundColor: "rgba(27, 97, 201, 0.08)",
+                                  color: "primary.dark",
+                                  border: "1px solid rgba(27, 97, 201, 0.2)",
+                                  maxWidth: "100%",
+                                  "& .MuiChip-label": { px: 0.5 },
+                                }}
+                              />
+                            </Tooltip>
+                          ) : (
+                            <Tooltip title={full}>
+                              <Box component="span" sx={{ color: "text.disabled" }}>
+                                —
                               </Box>
                             </Tooltip>
                           )}

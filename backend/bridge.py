@@ -13,6 +13,7 @@ from backend.param_templates import generate_many
 from backend.provider_probe import probe_provider_models
 from backend.secrets import describe_api_key
 from backend.settings_store import SettingsStore
+from backend.version import opencode_runtime
 
 
 class Bridge:
@@ -229,4 +230,5 @@ class Bridge:
             "catalogCachePath": None if cache is None else str(cache),
             "defaultConfigPath": str(self._config.default_path),
             "ccswitchDbPath": str(self._ccswitch.db_path),
+            "opencode": opencode_runtime(),
         }

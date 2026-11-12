@@ -10,7 +10,7 @@ from backend.bridge import Bridge
 from backend.ccswitch_service import CcSwitchService
 from backend.errors import ServiceError
 from backend.config_service import ConfigService, document_from_raw, to_raw
-from backend.fields import DROPPED_META_KEYS, model_prefix
+from backend.fields import CACHE_TTL_PATTERN, DROPPED_META_KEYS, is_duration_words, model_prefix
 from backend.metadata_service import MetadataService
 from backend.param_templates import generate
 from backend.paths import PROJECT_ROOT, catalog_cache_path
@@ -899,6 +899,140 @@ class ParamTemplateTests(unittest.TestCase):
         envelope = bridge.generate_model_params([{"modelKey": "kimi-k3", "npm": "@ai-sdk/xai"}])
         self.assertTrue(envelope["ok"])
         self.assertEqual(envelope["data"][0]["variants"]["low"], {"reasoningEffort": "low"})
+
+
+class FormatAndCacheTests(unittest.TestCase):
+    NO_RUNTIME = {"available": False, "version": None, "major": None}
+
+    def load(self, raw, runtime=None):
+        return document_from_raw(raw, Path("x.json"), True, 1, runtime or self.NO_RUNTIME)
+
+    def v2_raw(self):
+        return {
+            "plugin": ["p"],
+            "providers": {
+                "demo": {
+                    "canonical": "demo",
+                    "name": "Demo",
+                    "env": ["DEMO_KEY"],
+                    "package": "@ai-sdk/openai-compatible",
+                    "compatibility": {"mode": "chat"},
+                    "settings": {"baseURL": "https://example.test/v1", "timeout": 1000},
+                    "headers": {"X-Test": "1"},
+                    "body": {"a": 1},
+                    "models": {
+                        "m1": {
+                            "modelID": "m1-id",
+                            "name": "M1",
+                            "family": "fam",
+                            "releaseDate": "2025-01-01",
+                            "disabled": True,
+                            "capabilities": {
+                                "tools": True,
+                                "temperature": False,
+                                "reasoning": {"supported": True, "effort": ["low", "high"]},
+                                "input": ["text", "image"],
+                                "output": ["text"],
+                            },
+                            "compatibility": {"reasoningField": "reasoning_content", "other": {"k": 1}},
+                            "variants": [
+                                {"id": "low", "settings": {"effort": "low"}, "headers": {"H": "v"}},
+                                {"id": "high", "body": {"x": 1}},
+                            ],
+                            "cost": {"input": 1, "output": 2, "cache": {"read": 0.1, "write": 0.2}},
+                            "settings": {"compaction": {"auto": True}, "cache": {"ttl": "1h"}},
+                            "limit": {"context": 1000, "output": 100},
+                        },
+                        "m2": {"modelID": "m2", "cost": [{"input": 1, "output": 2}]},
+                    },
+                }
+            },
+        }
+
+    def test_v1_round_trip_unchanged(self):
+        raw = {"provider": {"d": {"npm": "n", "models": {"m": {"id": "x", "tool_call": True, "options": {"a": 1}}}}}}
+        doc = self.load(raw)
+        self.assertEqual(doc["format"], "v1")
+        out = to_raw(doc)
+        self.assertEqual(out, raw)
+        self.assertNotIn("providers", out)
+
+    def test_v2_round_trip_equal(self):
+        raw = self.v2_raw()
+        doc = self.load(raw)
+        self.assertEqual(doc["format"], "v2")
+        model = doc["providers"][0]["models"][0]
+        self.assertTrue(model["attachment"])
+        self.assertEqual(model["interleaved"], "reasoning_content")
+        self.assertEqual(model["cache"]["ttl"], "1h")
+        out = to_raw(doc)
+        self.assertEqual(out, raw)
+        self.assertNotIn("provider", out)
+
+    def test_both_containers_keep_provider(self):
+        raw = {"provider": {"old": {"npm": "x"}}, "providers": {"new": {"package": "y", "models": {}}}}
+        doc = self.load(raw)
+        self.assertEqual(doc["format"], "v2")
+        self.assertEqual(doc["preserved"]["provider"], {"old": {"npm": "x"}})
+        self.assertEqual(to_raw(doc), raw)
+
+    def test_detect_format(self):
+        self.assertEqual(self.load({"provider": {}})["format"], "v1")
+        self.assertEqual(self.load({"providers": {}})["format"], "v2")
+        doc = self.load({}, {"available": True, "version": "2.2.7", "major": 2})
+        self.assertEqual((doc["format"], doc["formatSource"]), ("v2", "runtime"))
+        self.assertIn("providers", to_raw(doc))
+        doc = self.load({})
+        self.assertEqual((doc["format"], doc["formatSource"]), ("v1", "default"))
+        self.assertEqual(doc["opencode"], self.NO_RUNTIME)
+        with self.assertRaises(ServiceError):
+            to_raw({**doc, "format": "v3"})
+
+    def test_cache_read_write_both_formats(self):
+        cache = {"ttl": "5m", "warming": {"interval": "4.5 minutes", "duration": "1 hour"}}
+        v1 = {"provider": {"d": {"models": {"m": {"options": {"cache": cache, "x": 1}}}}}}
+        doc = self.load(v1)
+        self.assertEqual(doc["providers"][0]["models"][0]["cache"]["ttl"], "5m")
+        self.assertEqual(to_raw(doc), v1)
+        v2 = {"providers": {"d": {"models": {"m": {"settings": {"cache": {"warming": True}}}}}}}
+        self.assertEqual(to_raw(self.load(v2)), v2)
+
+    def test_cache_unset_stays_absent(self):
+        raw = {"provider": {"d": {"models": {"m": {"options": {"x": 1}}}}}}
+        out = to_raw(self.load(raw))
+        self.assertEqual(out, raw)
+        self.assertNotIn("cache", out["provider"]["d"]["models"]["m"]["options"])
+
+    def test_invalid_cache_survives(self):
+        for bad in ("oops", {"ttl": "1h", "warming": 5}):
+            raw = {"provider": {"d": {"models": {"m": {"options": {"cache": bad}}}}}}
+            doc = self.load(raw)
+            model = doc["providers"][0]["models"][0]
+            self.assertEqual(model["cache"], {"ttl": None, "warming": None})
+            self.assertEqual(to_raw(doc), raw)
+
+    def test_cache_validation(self):
+        def doc_with(cache):
+            doc = self.load({"provider": {"d": {"models": {"m": {}}}}})
+            doc["providers"][0]["models"][0]["cache"] = cache
+            return doc
+
+        for bad in (
+            {"ttl": "1 hour", "warming": None},
+            {"ttl": None, "warming": {"interval": "5m", "duration": None}},
+            {"ttl": None, "warming": {"interval": None, "duration": "auto"}},
+        ):
+            with self.assertRaises(ServiceError) as ctx:
+                to_raw(doc_with(bad))
+            self.assertEqual(ctx.exception.code, "validation_error")
+        for good in (
+            {"ttl": "1h", "warming": {"interval": "4 minutes", "duration": "1 hour"}},
+            {"ttl": "30s", "warming": {"interval": "auto", "duration": None}},
+        ):
+            to_raw(doc_with(good))
+        self.assertTrue(is_duration_words("4.5 minutes"))
+        self.assertFalse(is_duration_words("5m"))
+        self.assertTrue(CACHE_TTL_PATTERN.match("1h"))
 
 
 if __name__ == "__main__":

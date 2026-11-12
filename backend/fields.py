@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from backend.errors import ServiceError
 
 PROVIDER_OPTION_KEYS = (
@@ -141,6 +143,94 @@ def denormalize_interleaved(value: object) -> bool | dict | None:
     if isinstance(normalized, bool):
         return normalized
     return {"field": normalized}
+
+
+CACHE_TTL_PATTERN = re.compile(r"^[+-]?(\d+(\.\d+)?|\.\d+)(ms|s|m|h|d)$")
+_DURATION_UNITS = (
+    r"(ms|milliseconds?|s|secs?|seconds?|min|minutes?|h|hrs?|hours?|d|days?|w|weeks?)"
+)
+DURATION_WORDS_PATTERN = re.compile(r"^[+-]?(\d+(\.\d+)?|\.\d+) " + _DURATION_UNITS + "$")
+
+
+def is_duration_words(value: object, allow_auto: bool = False) -> bool:
+    if not isinstance(value, str):
+        return False
+    if allow_auto and value == "auto":
+        return True
+    return DURATION_WORDS_PATTERN.match(value) is not None
+
+
+def empty_cache() -> dict:
+    return {"ttl": None, "warming": None}
+
+
+def normalize_cache(value: object) -> tuple[dict, bool]:
+    """Return (structured cache, fits). Values that do not fit stay untouched elsewhere."""
+    if not isinstance(value, dict) or not value:
+        return empty_cache(), False
+    if set(value) - {"ttl", "warming"}:
+        return empty_cache(), False
+    ttl = None
+    if "ttl" in value:
+        if not isinstance(value["ttl"], str):
+            return empty_cache(), False
+        ttl = value["ttl"]
+    warming: bool | dict | None = None
+    if "warming" in value:
+        item = value["warming"]
+        if isinstance(item, bool):
+            warming = item
+        elif isinstance(item, dict) and item and not (set(item) - {"interval", "duration"}):
+            if not all(isinstance(part, str) for part in item.values()):
+                return empty_cache(), False
+            warming = {"interval": item.get("interval"), "duration": item.get("duration")}
+        else:
+            return empty_cache(), False
+    return {"ttl": ttl, "warming": warming}, True
+
+
+def denormalize_cache(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    raw: dict = {}
+    ttl = value.get("ttl")
+    if isinstance(ttl, str) and ttl.strip():
+        raw["ttl"] = ttl.strip()
+    warming = value.get("warming")
+    if isinstance(warming, bool):
+        raw["warming"] = warming
+    elif isinstance(warming, dict):
+        part: dict = {}
+        for key in ("interval", "duration"):
+            item = warming.get(key)
+            if isinstance(item, str) and item.strip():
+                part[key] = item.strip()
+        if part:
+            raw["warming"] = part
+    return raw or None
+
+
+def validate_cache(value: object) -> None:
+    raw = denormalize_cache(value)
+    if raw is None:
+        return
+    ttl = raw.get("ttl")
+    if ttl is not None and not CACHE_TTL_PATTERN.match(ttl):
+        raise ServiceError("validation_error", f"缓存时长格式不正确：{ttl}。缓存时长请写成 5m、1h 这样的紧凑格式")
+    warming = raw.get("warming")
+    if isinstance(warming, dict):
+        interval = warming.get("interval")
+        if interval is not None and not is_duration_words(interval, allow_auto=True):
+            raise ServiceError(
+                "validation_error",
+                f"预热间隔格式不正确：{interval}。请写成 auto，或带空格和完整单位的形式，例如 \"4.5 minutes\"，不能写 5m",
+            )
+        duration = warming.get("duration")
+        if duration is not None and not is_duration_words(duration):
+            raise ServiceError(
+                "validation_error",
+                f"预热时长格式不正确：{duration}。请带空格和完整单位，例如 \"1 hour\"，不能写 1h",
+            )
 
 
 def variants_from_reasoning(options: object) -> dict[str, dict]:

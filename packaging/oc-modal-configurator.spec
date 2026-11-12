@@ -74,6 +74,7 @@ hiddenimports += [
     "backend.provider_probe",
     "backend.secrets",
     "backend.settings_store",
+    "backend.version",
 ]
 
 a = Analysis(

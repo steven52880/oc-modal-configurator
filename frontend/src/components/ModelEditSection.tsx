@@ -48,7 +48,13 @@ import {
   MIXED_PLACEHOLDER,
   MODALITY_META,
   displayNpm,
+  effectiveNpm,
   normalizeNpmInput,
+  readCacheFromModel,
+  applyCacheToModel,
+  validateTtl,
+  validateWarmingInterval,
+  validateWarmingDuration,
   VARIANT_META,
   type KnownModality,
 } from "../utils/modelHelpers";
@@ -380,6 +386,24 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
     return hasCustomProps ? JSON.stringify(first.variants, null, 2) : "";
   });
 
+  // Layer 3 — Accordion 4: Cache
+  const initialCacheState = useMemo(() => readCacheFromModel(targets, isBatch), [targets, isBatch]);
+  const [cacheTtlMode, setCacheTtlMode] = useState<typeof initialCacheState.ttlMode>(
+    initialCacheState.ttlMode,
+  );
+  const [cacheTtlCustomText, setCacheTtlCustomText] = useState<string>(
+    initialCacheState.ttlCustomText,
+  );
+  const [cacheWarmingMode, setCacheWarmingMode] = useState<typeof initialCacheState.warmingMode>(
+    initialCacheState.warmingMode,
+  );
+  const [cacheWarmingIntervalText, setCacheWarmingIntervalText] = useState<string>(
+    initialCacheState.warmingIntervalText,
+  );
+  const [cacheWarmingDurationText, setCacheWarmingDurationText] = useState<string>(
+    initialCacheState.warmingDurationText,
+  );
+
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Match defaults via bridge
@@ -481,6 +505,13 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
     extraOptionsText,
     variantsJsonText,
   ]);
+
+  const cacheAccordionCount = useMemo(() => {
+    let count = 0;
+    if (cacheTtlMode !== "unset") count += 1;
+    if (cacheWarmingMode !== "unset") count += 1;
+    return count;
+  }, [cacheTtlMode, cacheWarmingMode]);
 
   const parseNumberField = (
     text: string,
@@ -601,6 +632,28 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
       }
     }
 
+    // Validate Cache fields
+    if (cacheTtlMode === "custom") {
+      const ttlErr = validateTtl(cacheTtlCustomText);
+      if (ttlErr) {
+        setErrorMessage(ttlErr);
+        return;
+      }
+    }
+
+    if (cacheWarmingMode === "custom") {
+      const intervalErr = validateWarmingInterval(cacheWarmingIntervalText);
+      if (intervalErr) {
+        setErrorMessage(intervalErr);
+        return;
+      }
+      const durationErr = validateWarmingDuration(cacheWarmingDurationText);
+      if (durationErr) {
+        setErrorMessage(durationErr);
+        return;
+      }
+    }
+
     const updated: ModelEntry[] = targets.map((target) => {
       // 1. Modalities (preserve unknown modalities on each target)
       const existingIn = target.modalities?.input ?? [];
@@ -703,6 +756,14 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
         }
       }
 
+      const nextCache = applyCacheToModel(target, {
+        ttlMode: cacheTtlMode,
+        ttlCustomText: cacheTtlCustomText,
+        warmingMode: cacheWarmingMode,
+        warmingIntervalText: cacheWarmingIntervalText,
+        warmingDurationText: cacheWarmingDurationText,
+      });
+
       return {
         ...target,
         key: isBatch ? target.key : trimmedKey,
@@ -733,6 +794,7 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
           cache_write: costMixed.cache_write ? target.cost.cache_write : parsedCosts.cache_write,
           extra: { ...(target.cost.extra ?? {}) },
         },
+        cache: nextCache,
         options: nextOptions,
         headers: headersMixed ? target.headers : rowsToHeaderMap(headerRows),
         provider: {
@@ -1740,6 +1802,152 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
                   },
                 }}
               />
+            </Box>
+          </Stack>
+        </AccordionDetails>
+      </Accordion>
+
+      {/* Accordion 4: Cache */}
+      <Accordion defaultExpanded={false}>
+        <AccordionSummary expandIcon={<ExpandMoreIcon fontSize="small" />}>
+          <Typography variant="subtitle2">
+            提示缓存 (cache)
+          </Typography>
+          {cacheAccordionCount > 0 && (
+            <Chip
+              label={`已配置 ${cacheAccordionCount} 项`}
+              size="small"
+              color="primary"
+              sx={{ height: 20 }}
+            />
+          )}
+        </AccordionSummary>
+        <AccordionDetails>
+          <Stack spacing={2}>
+            {/* Warning line for effective protocol !== @ai-sdk/anthropic */}
+            {effectiveNpm(first, providerNpm) !== "@ai-sdk/anthropic" && cacheTtlMode !== "unset" && (
+              <Alert severity="warning" sx={{ py: 0.5, px: 1.5, fontSize: "0.8125rem" }}>
+                该模型协议不是 Anthropic，1h 会按 OpenAI 兼容方式发送（只有 24h 会走 prompt_cache_retention），请确认中转站接受该字段。
+              </Alert>
+            )}
+
+            {/* Helper Text */}
+            <Typography variant="caption" sx={{ color: "text.secondary", display: "block" }}>
+              • 未设置 = 不写入，继承提供商或 opencode 默认（Anthropic 默认 5 分钟）。
+              <br />
+              • 缓存时长只支持紧凑写法：5m、1h、30s、1d。
+              <br />• 预热间隔/窗口必须写完整词，例如 "4 minutes"、"1 hour"、"auto"；写成 1h 会被 opencode 静默忽略。
+            </Typography>
+
+            {/* Field 1: 缓存时长 (cache.ttl) */}
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: {
+                  xs: "1fr",
+                  sm: cacheTtlMode === "custom" ? "1fr 1fr" : "1fr",
+                },
+                gap: 2,
+              }}
+            >
+              <FormControl size="small" fullWidth>
+                <InputLabel id="cache-ttl-label">缓存时长 (cache.ttl)</InputLabel>
+                <Select
+                  labelId="cache-ttl-label"
+                  label="缓存时长 (cache.ttl)"
+                  value={cacheTtlMode}
+                  onChange={(e) =>
+                    setCacheTtlMode(e.target.value as typeof cacheTtlMode)
+                  }
+                >
+                  {isBatch && <MenuItem value="__MIXED__">&lt;...&gt; 保持原值</MenuItem>}
+                  <MenuItem value="unset">未设置(继承)</MenuItem>
+                  <MenuItem value="5m">5m</MenuItem>
+                  <MenuItem value="1h">1h</MenuItem>
+                  <MenuItem value="custom">自定义</MenuItem>
+                </Select>
+              </FormControl>
+
+              {cacheTtlMode === "custom" && (
+                <TextField
+                  size="small"
+                  fullWidth
+                  label="自定义缓存时长"
+                  placeholder="例如：30s, 1d"
+                  value={cacheTtlCustomText}
+                  onChange={(e) => setCacheTtlCustomText(e.target.value)}
+                  error={Boolean(validateTtl(cacheTtlCustomText))}
+                  helperText={validateTtl(cacheTtlCustomText) ?? '紧凑写法，如 "30s"、"1d"'}
+                  sx={{
+                    "& .MuiInputBase-input": { fontFamily: MONOSPACE_FONT },
+                  }}
+                />
+              )}
+            </Box>
+
+            {/* Field 2: 会话预热 (cache.warming) */}
+            <Box>
+              <FormControl size="small" fullWidth>
+                <InputLabel id="cache-warming-label">会话预热 (cache.warming)</InputLabel>
+                <Select
+                  labelId="cache-warming-label"
+                  label="会话预热 (cache.warming)"
+                  value={cacheWarmingMode}
+                  onChange={(e) =>
+                    setCacheWarmingMode(e.target.value as typeof cacheWarmingMode)
+                  }
+                >
+                  {isBatch && <MenuItem value="__MIXED__">&lt;...&gt; 保持原值</MenuItem>}
+                  <MenuItem value="unset">未设置</MenuItem>
+                  <MenuItem value="false">关闭(false)</MenuItem>
+                  <MenuItem value="true">开启(true)</MenuItem>
+                  <MenuItem value="custom">自定义</MenuItem>
+                </Select>
+              </FormControl>
+
+              {cacheWarmingMode === "custom" && (
+                <Box
+                  sx={{
+                    display: "grid",
+                    gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                    gap: 2,
+                    mt: 2,
+                  }}
+                >
+                  <TextField
+                    size="small"
+                    fullWidth
+                    label="间隔 (interval)"
+                    placeholder='例如 "4 minutes" 或 "auto"'
+                    value={cacheWarmingIntervalText}
+                    onChange={(e) => setCacheWarmingIntervalText(e.target.value)}
+                    error={Boolean(validateWarmingInterval(cacheWarmingIntervalText))}
+                    helperText={
+                      validateWarmingInterval(cacheWarmingIntervalText) ??
+                      '例如 "4 minutes"、"1 hour"、"auto"'
+                    }
+                    sx={{
+                      "& .MuiInputBase-input": { fontFamily: MONOSPACE_FONT },
+                    }}
+                  />
+                  <TextField
+                    size="small"
+                    fullWidth
+                    label="窗口 (duration)"
+                    placeholder='例如 "1 hour"'
+                    value={cacheWarmingDurationText}
+                    onChange={(e) => setCacheWarmingDurationText(e.target.value)}
+                    error={Boolean(validateWarmingDuration(cacheWarmingDurationText))}
+                    helperText={
+                      validateWarmingDuration(cacheWarmingDurationText) ??
+                      '例如 "4 minutes"、"1 hour"'
+                    }
+                    sx={{
+                      "& .MuiInputBase-input": { fontFamily: MONOSPACE_FONT },
+                    }}
+                  />
+                </Box>
+              )}
             </Box>
           </Stack>
         </AccordionDetails>

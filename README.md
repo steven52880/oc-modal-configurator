@@ -24,6 +24,8 @@
   - 内置 `models.dev` 默认值引擎（预留多数据源接口），按需下载至用户缓存目录；
   - 若处于防火墙/内网环境无法在线下载模型库，界面直接提示下载链接与本地目标路径，放入文件后点击「已放好，重新读取」即可热加载。
 - **CC Switch 数据源**：页面头部「配置来源」可切换为 CC Switch，直接编辑 `~/.cc-switch/cc-switch.db` 中的 OpenCode 提供商，并同步写入 `opencode.json`（CC Switch 每次启动都会以 `opencode.json` 为准）。保存前需完全退出 CC Switch；已验证的数据库版本为 v19–v24；高于已验证范围的新版本默认禁止读写，确认风险后可点击「跳过版本检查并继续」读写（按数据库版本记住，CC Switch 再次升级后会重新提示），更旧或未知的版本始终禁止读写；OMO 配置与 OpenCode V2 原生格式条目只读展示、不会被修改；保存前生成 `cc-switch.db.oc-modal.bak` 与 `opencode.json.bak` 备份。
+- **OpenCode V1 / V2 双格式读写**：自动识别文件使用的是 V1（`provider`/`npm`/`options`）还是 V2（`providers`/`package`/`settings`）原生格式，并按原格式无损写回，绝不擅自插入另一种格式的容器；同时探测本机安装的 `opencode --version`，状态栏用「V1 格式 · 运行时 v2.2.7」区分磁盘格式与运行时版本。V2 的 `capabilities`、`compatibility`、`variants` 数组（含每个变体的 `headers`/`body`）、嵌套 `cost`、`modelID`、`disabled` 等字段全部原样保留。
+- **提示缓存（模型级 `cache`）**：模型详情弹窗新增「提示缓存 (cache)」分组，可设置 `cache.ttl`（`5m` / `1h` / 自定义）与 `cache.warming`（关闭 / 开启 / 自定义间隔与窗口），写入模型自己的 `options.cache`（V1）或 `settings.cache`（V2）。保存前校验格式：`ttl` 必须是 `5m` 这类紧凑写法，预热间隔/窗口必须是 `"4 minutes"` 这类带单位的完整写法（写成 `1h` 会被 opencode 静默忽略），并对非 Anthropic 协议的模型给出字段走向提示。
 - **安全保存与外部修改冲突检测**：保存前自动生成同目录 `.bak` 备份；通过纳秒级修改时间 (`mtimeNs`) 检测外部编辑器改动，发生冲突时弹窗询问重新加载或强制覆盖。
 
 ---
@@ -44,7 +46,8 @@ oc-modal-configurator/
 ├── requirements.txt              # Python 依赖声明 (pywebview)
 ├── backend/                      # Python 本地后端服务
 │   ├── bridge.py                 # 暴露给 pywebview 与 HTTP 开发服务器的统一 JSON RPC Bridge
-│   ├── config_service.py         # opencode.json 无损读写、校验、.bak 备份与 mtimeNs 冲突检测
+│   ├── config_service.py         # opencode.json 无损读写、V1/V2 格式识别与映射、校验、.bak 备份与 mtimeNs 冲突检测
+│   ├── version.py                # 本机 opencode 运行时版本探测（opencode --version，带超时与缓存）
 │   ├── ccswitch_service.py       # CC Switch 数据库中 OpenCode 提供商的读写、版本白名单与 opencode.json 同步
 │   ├── metadata_service.py       # 模型库数据源抽象 (MetadataSource)、本地缓存索引与默认值匹配引擎
 │   ├── provider_probe.py         # 提供商 /models 在线拉取、解析与前缀分组

@@ -1420,6 +1420,60 @@ export const App: React.FC = () => {
             </Tooltip>
           )}
 
+          {/* V1 / V2 Format Chip */}
+          {documentData && (() => {
+            const isV2 = documentData.format === "v2";
+            const formatText = isV2 ? "V2 格式" : "V1 格式";
+            const opencodeInfo = documentData.opencode;
+
+            let runtimeAppend = "";
+            if (opencodeInfo?.available && opencodeInfo.version) {
+              runtimeAppend = ` · 运行时 v${opencodeInfo.version}`;
+            }
+
+            const chipLabel = `${formatText}${runtimeAppend}`;
+
+            let tooltipLines: string[] = [];
+            tooltipLines.push("配置文件的磁盘 Schema 格式（非本机 opencode 运行时版本）");
+
+            if (documentData.formatSource === "runtime" || documentData.formatSource === "default") {
+              tooltipLines.push("格式来源：推断格式（新建文件 / 未能从文件判断）");
+            }
+
+            if (!opencodeInfo || !opencodeInfo.available) {
+              tooltipLines.push("未检测到本机 opencode，无法判断运行时版本");
+            } else if (documentData.format === "v1" && opencodeInfo.major === 2) {
+              tooltipLines.push("当前文件是 V1 格式，opencode v2 仍然兼容并会自动转换");
+            }
+
+            return (
+              <Tooltip
+                title={
+                  <Box sx={{ lineHeight: 1.5 }}>
+                    {tooltipLines.map((line, idx) => (
+                      <React.Fragment key={idx}>
+                        {idx > 0 && <br />}
+                        {line}
+                      </React.Fragment>
+                    ))}
+                  </Box>
+                }
+              >
+                <Chip
+                  label={chipLabel}
+                  size="small"
+                  color={isV2 ? "success" : "default"}
+                  variant="outlined"
+                  sx={{
+                    fontFamily: MONOSPACE_FONT,
+                    fontSize: "0.75rem",
+                    height: 24,
+                  }}
+                />
+              </Tooltip>
+            );
+          })()}
+
           {configSource === "opencode" && (
             <Tooltip title="打开或切换配置文件">
               <Button

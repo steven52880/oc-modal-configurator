@@ -130,6 +130,10 @@ export interface ModelEntry {
   modalities: ModelModalities | null;
   variants: Record<string, Record<string, unknown>>;
   cost: ModelCost;
+  cache?: {
+    ttl: string | null;             // compact form only: "5m", "1h", "30s", "1d"
+    warming: boolean | { interval: string | null; duration: string | null } | null;
+  } | null;
   options: Record<string, unknown>;
   headers: HeaderMap;
   provider: ModelProviderOverride;
@@ -164,6 +168,9 @@ export interface ConfigDocument {
   /** Top-level opencode.json fields other than provider. Pass this through unchanged. */
   preserved: Record<string, unknown>;
   providers: ProviderEntry[];
+  format?: "v1" | "v2";              // which on-disk schema the file uses
+  formatSource?: "file" | "runtime" | "default";  // how it was decided
+  opencode?: { available: boolean; version: string | null; major: number | null };  // installed opencode runtime
   /** ccswitch only: the opencode.json kept in sync on save. */
   livePath?: string | null;
   /** ccswitch only: rows shown nowhere and never modified (OMO, V2 native, unreadable). */

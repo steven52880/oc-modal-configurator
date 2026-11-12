@@ -277,6 +277,7 @@ export function createEmptyModel(existingKeys: string[]): ModelEntry {
       api: null,
       extra: {},
     },
+    cache: null,
     meta: createEmptyMeta(),
     extra: {},
   };
@@ -338,6 +339,7 @@ export function createModelFromSource(
       api: null,
       extra: {},
     },
+    cache: null,
     meta: createEmptyMeta(hasDefaults && defaults ? defaults.meta : null),
     extra: {},
   };
@@ -565,4 +567,159 @@ export function splitCatalogPath(fullPath: string | null | undefined): {
     fileName: raw.slice(lastSep + 1) || "api.json",
   };
 }
+
+// ---------------------------------------------------------------------------
+// Model Cache Helpers (pure validation & state mapping)
+// ---------------------------------------------------------------------------
+
+export const TTL_REGEX = /^[+-]?(\d+(\.\d+)?|\.\d+)(ms|s|m|h|d)$/;
+export const WARMING_FULL_UNITS =
+  "ms|millisecond|milliseconds|s|sec|secs|second|seconds|min|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks";
+export const WARMING_INTERVAL_REGEX = new RegExp(
+  `^(auto|\\d+(\\.\\d+)?\\s+(${WARMING_FULL_UNITS}))$`,
+  "i",
+);
+export const WARMING_DURATION_REGEX = new RegExp(
+  `^\\d+(\\.\\d+)?\\s+(${WARMING_FULL_UNITS})$`,
+  "i",
+);
+
+export interface CacheState {
+  ttlMode: "unset" | "5m" | "1h" | "custom" | "__MIXED__";
+  ttlCustomText: string; // valid compact ttl string
+  warmingMode: "unset" | "false" | "true" | "custom" | "__MIXED__";
+  warmingIntervalText: string;
+  warmingDurationText: string;
+}
+
+export function validateTtl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!TTL_REGEX.test(trimmed)) {
+    return '缓存时长格式无效，只支持紧凑写法（如 "5m"、"1h"、"30s"、"1d"）';
+  }
+  return null;
+}
+
+export function validateWarmingInterval(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!WARMING_INTERVAL_REGEX.test(trimmed)) {
+    return '预热间隔格式无效，需写完整词（如 "4 minutes"、"1 hour"、"auto"）';
+  }
+  return null;
+}
+
+export function validateWarmingDuration(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!WARMING_DURATION_REGEX.test(trimmed)) {
+    return '预热窗口格式无效，需写完整词（如 "4 minutes"、"1 hour"）';
+  }
+  return null;
+}
+
+export function readCacheFromModel(
+  targets: ModelEntry[],
+  isBatch: boolean,
+): CacheState {
+  const first = targets[0];
+  const isSame = <T,>(getter: (m: ModelEntry) => T): boolean => {
+    const base = JSON.stringify(getter(first));
+    return targets.every((item) => JSON.stringify(getter(item)) === base);
+  };
+
+  // TTL
+  let ttlMode: CacheState["ttlMode"] = "unset";
+  let ttlCustomText = "";
+  if (isBatch && !isSame((m) => m.cache?.ttl ?? null)) {
+    ttlMode = "__MIXED__";
+  } else {
+    const ttlVal = first?.cache?.ttl ?? null;
+    if (ttlVal === null || ttlVal === undefined || ttlVal === "") {
+      ttlMode = "unset";
+    } else if (ttlVal === "5m") {
+      ttlMode = "5m";
+    } else if (ttlVal === "1h") {
+      ttlMode = "1h";
+    } else {
+      ttlMode = "custom";
+      ttlCustomText = ttlVal;
+    }
+  }
+
+  // Warming
+  let warmingMode: CacheState["warmingMode"] = "unset";
+  let warmingIntervalText = "";
+  let warmingDurationText = "";
+  if (isBatch && !isSame((m) => m.cache?.warming ?? null)) {
+    warmingMode = "__MIXED__";
+  } else {
+    const wVal = first?.cache?.warming ?? null;
+    if (wVal === null || wVal === undefined) {
+      warmingMode = "unset";
+    } else if (wVal === false) {
+      warmingMode = "false";
+    } else if (wVal === true) {
+      warmingMode = "true";
+    } else if (typeof wVal === "object") {
+      warmingMode = "custom";
+      warmingIntervalText = wVal.interval ?? "";
+      warmingDurationText = wVal.duration ?? "";
+    }
+  }
+
+  return {
+    ttlMode,
+    ttlCustomText,
+    warmingMode,
+    warmingIntervalText,
+    warmingDurationText,
+  };
+}
+
+export function applyCacheToModel(
+  target: ModelEntry,
+  state: CacheState,
+): NonNullable<ModelEntry["cache"]> | null {
+  // TTL resolution
+  let nextTtl: string | null = null;
+  if (state.ttlMode === "__MIXED__") {
+    nextTtl = target.cache?.ttl ?? null;
+  } else if (state.ttlMode === "unset") {
+    nextTtl = null;
+  } else if (state.ttlMode === "5m") {
+    nextTtl = "5m";
+  } else if (state.ttlMode === "1h") {
+    nextTtl = "1h";
+  } else if (state.ttlMode === "custom") {
+    nextTtl = state.ttlCustomText.trim() || null;
+  }
+
+  // Warming resolution
+  let nextWarming: NonNullable<ModelEntry["cache"]>["warming"] = null;
+  if (state.warmingMode === "__MIXED__") {
+    nextWarming = target.cache?.warming ?? null;
+  } else if (state.warmingMode === "unset") {
+    nextWarming = null;
+  } else if (state.warmingMode === "false") {
+    nextWarming = false;
+  } else if (state.warmingMode === "true") {
+    nextWarming = true;
+  } else if (state.warmingMode === "custom") {
+    const interval = state.warmingIntervalText.trim() || null;
+    const duration = state.warmingDurationText.trim() || null;
+    // 两项都留空时没有可写的值，按「未设置」处理，避免落盘一个空对象
+    nextWarming = interval === null && duration === null ? null : { interval, duration };
+  }
+
+  if (nextTtl === null && nextWarming === null) {
+    return null;
+  }
+  return {
+    ttl: nextTtl,
+    warming: nextWarming,
+  };
+}
+
 
