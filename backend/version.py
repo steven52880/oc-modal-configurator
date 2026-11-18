@@ -21,7 +21,16 @@ def opencode_runtime() -> dict:
                 break
         if not exe:
             return _unavailable()
-        proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5)
+        # CREATE_NO_WINDOW: opencode is usually an npm .cmd shim; without it the
+        # windowed app flashes a console window on every start.
+        proc = subprocess.run(
+            [exe, "--version"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
         text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
         match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
         if not match:
