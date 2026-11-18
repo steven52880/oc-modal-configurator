@@ -489,7 +489,6 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
   const advancedAccordionCount = useMemo(() => {
     let count = 0;
     if (!providerApiMixed && providerApiText.trim() !== "") count += 1;
-    if (!idMixed && idText.trim() !== "") count += 1;
     if (!headersMixed) count += headerRows.filter((r) => r.name.trim() !== "").length;
     if (!extraOptionsMixed && extraOptionsText.trim() !== "") count += 1;
     if (variantsJsonText.trim() !== "") count += 1;
@@ -497,8 +496,6 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
   }, [
     providerApiMixed,
     providerApiText,
-    idMixed,
-    idText,
     headersMixed,
     headerRows,
     extraOptionsMixed,
@@ -848,6 +845,35 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
           }}
         >
           <TextField
+            fullWidth
+            label="显示名称 (name)"
+            placeholder={nameMixed ? MIXED_PLACEHOLDER : "例如：DeepSeek V4 Flash"}
+            value={nameText}
+            onChange={(e) => {
+              setNameMixed(false);
+              setNameText(e.target.value);
+            }}
+            InputProps={{
+              endAdornment: defaults?.name ? (
+                <InputAdornment position="end">
+                  <Chip
+                    icon={<AutoFixHighIcon sx={{ fontSize: "13px !important" }} />}
+                    label={`默认: ${defaults.name}`}
+                    size="small"
+                    color="primary"
+                    variant="outlined"
+                    onClick={() => {
+                      setNameMixed(false);
+                      setNameText(defaults.name ?? "");
+                    }}
+                  />
+                </InputAdornment>
+              ) : undefined,
+            }}
+            sx={{ gridColumn: "1 / -1" }}
+          />
+
+          <TextField
             label="模型标识符 (Key)"
             disabled={isBatch}
             value={isBatch ? `已选 ${targets.length} 个模型` : keyText}
@@ -858,35 +884,19 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
             }}
           />
 
-          <Box>
-            <TextField
-              fullWidth
-              label="显示名称 (name)"
-              placeholder={nameMixed ? MIXED_PLACEHOLDER : "例如：DeepSeek V4 Flash"}
-              value={nameText}
-              onChange={(e) => {
-                setNameMixed(false);
-                setNameText(e.target.value);
-              }}
-              InputProps={{
-                endAdornment: defaults?.name ? (
-                  <InputAdornment position="end">
-                    <Chip
-                      icon={<AutoFixHighIcon sx={{ fontSize: "13px !important" }} />}
-                      label={`默认: ${defaults.name}`}
-                      size="small"
-                      color="primary"
-                      variant="outlined"
-                      onClick={() => {
-                        setNameMixed(false);
-                        setNameText(defaults.name ?? "");
-                      }}
-                    />
-                  </InputAdornment>
-                ) : undefined,
-              }}
-            />
-          </Box>
+          <TextField
+            label="上游模型 ID (id)"
+            placeholder={idMixed ? MIXED_PLACEHOLDER : `留空则使用模型标识符${isBatch ? "" : `「${keyText.trim() || first.key}」`}`}
+            value={idText}
+            onChange={(e) => {
+              setIdMixed(false);
+              setIdText(e.target.value);
+            }}
+            helperText="向上游 API 请求时实际发送的模型名"
+            sx={{
+              "& .MuiInputBase-input": { fontFamily: MONOSPACE_FONT },
+            }}
+          />
         </Box>
 
         {/* Group 1b: 协议 (provider.npm)，模型级覆盖，留空继承提供商 */}
@@ -1709,18 +1719,6 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
                 onChange={(e) => {
                   setProviderApiMixed(false);
                   setProviderApiText(e.target.value);
-                }}
-                sx={{
-                  "& .MuiInputBase-input": { fontFamily: MONOSPACE_FONT },
-                }}
-              />
-              <TextField
-                label="底层映射模型 ID (id)"
-                placeholder={idMixed ? MIXED_PLACEHOLDER : "留空则默认使用模型 Key"}
-                value={idText}
-                onChange={(e) => {
-                  setIdMixed(false);
-                  setIdText(e.target.value);
                 }}
                 sx={{
                   "& .MuiInputBase-input": { fontFamily: MONOSPACE_FONT },

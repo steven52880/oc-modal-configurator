@@ -722,4 +722,40 @@ export function applyCacheToModel(
   };
 }
 
+/**
+ * Smallest `${base}_${n}` (n >= startAt) not in usedKeys.
+ * Underscore keeps the suffix distinct from version-like ids such as `gpt-5-2`.
+ */
+export function allocateSuffixedKey(
+  base: string,
+  usedKeys: ReadonlySet<string>,
+  startAt = 2,
+): { key: string; suffix: number } {
+  let n = Math.max(2, startAt);
+  while (usedKeys.has(`${base}_${n}`)) n += 1;
+  return { key: `${base}_${n}`, suffix: n };
+}
 
+/**
+ * Key and display name for a duplicated provider/model.
+ * `foo` -> `foo_2`; `foo_2` -> `foo_3` (with name `Foo (2)` -> `Foo (3)`).
+ * A trailing `_n` counts as a copy suffix only when `foo` itself exists or is the
+ * model's upstream id, so a real name like `llama_3` becomes `llama_3_2`, not `llama_4`.
+ */
+export function duplicateIdentity(
+  key: string,
+  name: string | null,
+  usedKeys: ReadonlySet<string>,
+  upstreamId: string | null = null,
+): { key: string; name: string | null } {
+  const raw = /^(.+)_(\d+)$/.exec(key);
+  const match = raw && (usedKeys.has(raw[1]) || raw[1] === upstreamId) ? raw : null;
+  const base = match ? match[1] : key;
+  const prev = match ? Number(match[2]) : 1;
+  const next = allocateSuffixedKey(base, usedKeys, prev + 1);
+  if (!name) return { key: next.key, name: null };
+  const nameBase = match && name.endsWith(` (${prev})`)
+    ? name.slice(0, -` (${prev})`.length)
+    : name;
+  return { key: next.key, name: `${nameBase} (${next.suffix})` };
+}

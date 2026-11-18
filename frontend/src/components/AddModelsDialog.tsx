@@ -45,6 +45,7 @@ import type {
   RemoteModel,
 } from "../types/domain";
 import {
+  allocateSuffixedKey,
   createModelFromSource,
   formatNumberCompact,
   getPrefixColor,
@@ -62,6 +63,23 @@ interface NormalizedCandidate {
 interface NormalizedGroup {
   prefix: string;
   models: NormalizedCandidate[];
+}
+
+/**
+ * Picks a unique model key: the raw id when free, otherwise `${id}_2`, `${id}_3`, ...
+ * Returns the suffix number (null when no suffix was needed) and records the key as used.
+ */
+function allocateModelKey(
+  id: string,
+  usedKeys: Set<string>,
+): { key: string; suffix: number | null } {
+  if (!usedKeys.has(id)) {
+    usedKeys.add(id);
+    return { key: id, suffix: null };
+  }
+  const next = allocateSuffixedKey(id, usedKeys);
+  usedKeys.add(next.key);
+  return next;
 }
 
 interface AddModelsDialogProps {
@@ -106,10 +124,15 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
   const [expandedPrefixes, setExpandedPrefixes] = useState<Record<string, boolean>>({});
   const [filterText, setFilterText] = useState<string>("");
 
-  const existingIds = useMemo(
-    () => new Set((provider?.models ?? []).map((m) => m.key)),
-    [provider],
-  );
+  // 已有模型：键名或底层映射 id 与候选 id 相同（键名被改过但 id 仍指向同一模型也算已有）
+  const existingIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const m of provider?.models ?? []) {
+      set.add(m.key);
+      if (m.id) set.add(m.id);
+    }
+    return set;
+  }, [provider]);
 
   const runProbe = useCallback(async () => {
     if (!provider) return;
@@ -301,7 +324,6 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
   }, [sourceTab, probeResult, catalogResult, filterText]);
 
   const toggleCandidate = (candidate: NormalizedCandidate, checked: boolean) => {
-    if (existingIds.has(candidate.id)) return;
     setSelectedMap((prev) => {
       const next = { ...prev };
       if (checked) {
@@ -313,17 +335,19 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
     });
   };
 
+  // 整组勾选只批量选中尚未存在的模型；若整组都已存在，则作用于整组
+  const groupTargets = (group: NormalizedGroup) => {
+    const fresh = group.models.filter((m) => !existingIds.has(m.id));
+    return fresh.length > 0 ? fresh : group.models;
+  };
+
   const toggleGroup = (group: NormalizedGroup, checked: boolean) => {
-    const addable = group.models.filter((m) => !existingIds.has(m.id));
-    if (addable.length === 0) return;
     setSelectedMap((prev) => {
       const next = { ...prev };
-      for (const item of addable) {
-        if (checked) {
-          next[item.id] = item;
-        } else {
-          delete next[item.id];
-        }
+      if (checked) {
+        for (const item of groupTargets(group)) next[item.id] = item;
+      } else {
+        for (const item of group.models) delete next[item.id];
       }
       return next;
     });
@@ -349,13 +373,42 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
 
   const selectedList = useMemo(() => Object.values(selectedMap), [selectedMap]);
 
+  // 预分配最终键名：与现有键名冲突时追加数字后缀
+  const plannedKeys = useMemo(() => {
+    const usedKeys = new Set((provider?.models ?? []).map((m) => m.key));
+    const planned = new Map<string, { key: string; suffix: number | null }>();
+    // 先给不冲突的候选占用原名，再给冲突的分配后缀，避免后缀抢占其它候选的原名
+    const ordered = [
+      ...selectedList.filter((c) => !usedKeys.has(c.id)),
+      ...selectedList.filter((c) => usedKeys.has(c.id)),
+    ];
+    for (const candidate of ordered) {
+      planned.set(candidate.id, allocateModelKey(candidate.id, usedKeys));
+    }
+    return planned;
+  }, [provider, selectedList]);
+
+  const renamedCount = useMemo(
+    () => [...plannedKeys.values()].filter((p) => p.suffix !== null).length,
+    [plannedKeys],
+  );
+
   const handleConfirmAdd = () => {
     const newEntries: ModelEntry[] = [];
     for (const candidate of selectedList) {
-      if (existingIds.has(candidate.id)) continue;
-      newEntries.push(
-        createModelFromSource(candidate.id, candidate.name, candidate.defaults),
-      );
+      const entry = createModelFromSource(candidate.id, candidate.name, candidate.defaults);
+      const plan = plannedKeys.get(candidate.id);
+      if (!plan || plan.suffix === null) {
+        newEntries.push(entry);
+        continue;
+      }
+      // 键名加后缀后，用 id 指回真实模型，显示名称同步加后缀便于区分
+      newEntries.push({
+        ...entry,
+        key: plan.key,
+        id: candidate.id,
+        name: entry.name ? `${entry.name} (${plan.suffix})` : null,
+      });
     }
     onAddModels(newEntries);
   };
@@ -806,12 +859,12 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
 
         <Stack spacing={1}>
           {activeGroups.map((group) => {
-            const addable = group.models.filter((m) => !existingIds.has(m.id));
-            const selectedInGroup = addable.filter((m) => Boolean(selectedMap[m.id]));
+            const existingInGroup = group.models.filter((m) => existingIds.has(m.id)).length;
+            const targets = groupTargets(group);
+            const selectedInGroup = group.models.filter((m) => Boolean(selectedMap[m.id]));
             const allGroupChecked =
-              addable.length > 0 && selectedInGroup.length === addable.length;
-            const groupIndeterminate =
-              selectedInGroup.length > 0 && selectedInGroup.length < addable.length;
+              targets.length > 0 && targets.every((m) => Boolean(selectedMap[m.id]));
+            const groupIndeterminate = selectedInGroup.length > 0 && !allGroupChecked;
             const prefixColor = getPrefixColor(group.prefix);
             const isExpanded = expandedPrefixes[group.prefix] ?? activeGroups.length <= 5;
 
@@ -833,7 +886,6 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
                     <Stack direction="row" alignItems="center" spacing={1}>
                       <Checkbox
                         size="small"
-                        disabled={addable.length === 0}
                         checked={allGroupChecked}
                         indeterminate={groupIndeterminate}
                         onClick={(e) => e.stopPropagation()}
@@ -863,9 +915,9 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
                           color="primary"
                         />
                       )}
-                      {addable.length < group.models.length && (
+                      {existingInGroup > 0 && (
                         <Chip
-                          label={`已存在 ${group.models.length - addable.length}`}
+                          label={`已存在 ${existingInGroup}`}
                           size="small"
                           variant="outlined"
                         />
@@ -878,6 +930,7 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
                     {group.models.map((item) => {
                       const alreadyExists = existingIds.has(item.id);
                       const checked = Boolean(selectedMap[item.id]);
+                      const plannedKey = checked ? plannedKeys.get(item.id) : undefined;
                       const def = item.defaults;
                       const hasDef = Boolean(def && def.found);
 
@@ -892,23 +945,20 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
                           sx={{
                             px: 2,
                             py: 0.75,
-                            cursor: alreadyExists ? "default" : "pointer",
+                            cursor: "pointer",
                             backgroundColor: checked
                               ? "rgba(27, 97, 201, 0.05)"
                               : alreadyExists
                                 ? "#f8fafc"
                                 : "#ffffff",
                             "&:hover": {
-                              backgroundColor: alreadyExists
-                                ? "#f8fafc"
-                                : "rgba(27, 97, 201, 0.08)",
+                              backgroundColor: "rgba(27, 97, 201, 0.08)",
                             },
                           }}
                         >
                           <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
                             <Checkbox
                               size="small"
-                              disabled={alreadyExists}
                               checked={checked}
                               onChange={(e) => toggleCandidate(item, e.target.checked)}
                             />
@@ -917,7 +967,7 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
                               sx={{
                                 fontFamily: MONOSPACE_FONT,
                                 fontWeight: checked ? 600 : 500,
-                                color: alreadyExists ? "text.disabled" : "text.primary",
+                                color: alreadyExists && !checked ? "text.secondary" : "text.primary",
                               }}
                             >
                               {item.id}
@@ -968,10 +1018,19 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
                             )}
                             {alreadyExists && (
                               <Chip
-                                label="已存在（跳过）"
+                                label="已存在"
                                 size="small"
                                 color="default"
                                 sx={{ height: 20, fontSize: "0.68rem" }}
+                              />
+                            )}
+                            {plannedKey && plannedKey.suffix !== null && (
+                              <Chip
+                                label={`将添加为 ${plannedKey.key}`}
+                                size="small"
+                                color="primary"
+                                variant="outlined"
+                                sx={{ height: 20, fontSize: "0.68rem", fontFamily: MONOSPACE_FONT }}
                               />
                             )}
                           </Stack>
@@ -994,7 +1053,8 @@ export const AddModelsDialog: React.FC<AddModelsDialogProps> = ({
           sx={{ width: "100%" }}
         >
           <Typography variant="caption" sx={{ color: "text.secondary" }}>
-            已勾选 <strong>{selectedList.length}</strong> 个待添加模型（确认后将自动带入默认上下文、模态与变体配置）
+            已勾选 <strong>{selectedList.length}</strong> 个待添加模型（确认后将自动带入默认上下文、模态与变体配置
+            {renamedCount > 0 && `；其中 ${renamedCount} 个与现有标识符重名，将自动加数字后缀`}）
           </Typography>
           <Stack direction="row" spacing={1}>
             <Button variant="outlined" color="inherit" onClick={onClose}>

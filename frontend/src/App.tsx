@@ -48,6 +48,7 @@ import {
   createEmptyModel,
   createEmptyProvider,
   diffManagedFields,
+  duplicateIdentity,
   effectiveNpm,
   MANAGED_FIELD_LABELS,
   matchesParamTemplate,
@@ -763,6 +764,38 @@ export const App: React.FC = () => {
     setDirty(true);
   };
 
+  // 复制提供商（含全部模型），副本插在各自原提供商下方，并选中第一个副本
+  const handleDuplicateProviders = (keysToCopy: string[]) => {
+    if (!documentData || keysToCopy.length === 0) return;
+    const copySet = new Set(keysToCopy);
+    // CC Switch 只读项也占用标识符
+    const usedKeys = new Set([
+      ...documentData.providers.map((p) => p.key),
+      ...(documentData.lockedProviders ?? []).map((p) => p.key),
+    ]);
+    const providers: ProviderEntry[] = [];
+    const copiedKeys: string[] = [];
+    for (const source of documentData.providers) {
+      providers.push(source);
+      if (!copySet.has(source.key)) continue;
+      const identity = duplicateIdentity(source.key, source.name, usedKeys);
+      usedKeys.add(identity.key);
+      providers.push({ ...structuredClone(source), ...identity });
+      copiedKeys.push(identity.key);
+    }
+    if (copiedKeys.length === 0) return;
+    setDocumentData((prev) => (prev ? { ...prev, providers } : null));
+    setSelectedProviderKey(copiedKeys[0]);
+    setCheckedModelKeys([]);
+    setDirty(true);
+    notify(
+      copiedKeys.length === 1
+        ? `已复制提供商为「${copiedKeys[0]}」`
+        : `已复制 ${copiedKeys.length} 个提供商`,
+      "success",
+    );
+  };
+
   // Model Mutations
   const handleUpdateModelCell = useCallback(
     (
@@ -1195,6 +1228,41 @@ export const App: React.FC = () => {
     );
     setCheckedModelKeys((prev) => prev.filter((k) => !removeSet.has(k)));
     setDirty(true);
+  };
+
+  // 复制模型，副本插在各自原模型下方；副本用 id 指回原上游模型
+  const handleDuplicateModels = (keysToCopy: string[]) => {
+    if (!selectedProvider || keysToCopy.length === 0) return;
+    const copySet = new Set(keysToCopy);
+    const usedKeys = new Set(selectedProvider.models.map((m) => m.key));
+    const models: ModelEntry[] = [];
+    const copiedKeys: string[] = [];
+    for (const source of selectedProvider.models) {
+      models.push(source);
+      if (!copySet.has(source.key)) continue;
+      const identity = duplicateIdentity(source.key, source.name, usedKeys, source.id);
+      usedKeys.add(identity.key);
+      models.push({ ...structuredClone(source), ...identity, id: source.id ?? source.key });
+      copiedKeys.push(identity.key);
+    }
+    if (copiedKeys.length === 0) return;
+    setDocumentData((prev) =>
+      prev
+        ? {
+            ...prev,
+            providers: prev.providers.map((p) =>
+              p.key === selectedProvider.key ? { ...p, models } : p,
+            ),
+          }
+        : null,
+    );
+    setDirty(true);
+    notify(
+      copiedKeys.length === 1
+        ? `已复制模型为「${copiedKeys[0]}」`
+        : `已复制 ${copiedKeys.length} 个模型`,
+      "success",
+    );
   };
 
   // Save handlers from EditDialog (preserve row checks after batch edit)
@@ -1908,6 +1976,7 @@ export const App: React.FC = () => {
                 });
               }}
               onDeleteProviders={handleDeleteProviders}
+              onDuplicateProviders={handleDuplicateProviders}
               onColumnWidthsCommit={handleProviderWidthsCommit}
               onStatusMessage={notify}
             />
@@ -1992,6 +2061,7 @@ export const App: React.FC = () => {
                 });
               }}
               onDeleteModels={handleDeleteModels}
+              onDuplicateModels={handleDuplicateModels}
               onColumnWidthsCommit={handleModelWidthsCommit}
               onStatusMessage={notify}
             />

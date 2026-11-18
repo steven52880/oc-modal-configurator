@@ -20,6 +20,7 @@ import {
 import AddIcon from "@mui/icons-material/Add";
 import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
 import CloudDownloadOutlinedIcon from "@mui/icons-material/CloudDownloadOutlined";
+import ContentCopyOutlinedIcon from "@mui/icons-material/ContentCopyOutlined";
 import ContentPasteGoIcon from "@mui/icons-material/ContentPasteGo";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
@@ -150,6 +151,7 @@ interface ModelTableProps {
   onOpenSingleEdit: (modelKey: string) => void;
   onOpenBatchEdit: () => void;
   onDeleteModels: (keys: string[]) => void;
+  onDuplicateModels: (keys: string[]) => void;
   onColumnWidthsCommit: (widths: Record<string, number>) => void;
   onStatusMessage: (message: string, severity?: "info" | "warning" | "error" | "success") => void;
 }
@@ -171,6 +173,7 @@ export const ModelTable: React.FC<ModelTableProps> = ({
   onOpenSingleEdit,
   onOpenBatchEdit,
   onDeleteModels,
+  onDuplicateModels,
   onColumnWidthsCommit,
   onStatusMessage,
 }) => {
@@ -479,6 +482,19 @@ export const ModelTable: React.FC<ModelTableProps> = ({
               </Button>
             </span>
           </Tooltip>
+          <Tooltip title="复制已勾选的模型（副本的上游模型 ID 指向原模型）">
+            <span>
+              <Button
+                size="small"
+                variant="outlined"
+                disabled={!provider || checkedKeys.length === 0}
+                startIcon={<ContentCopyOutlinedIcon fontSize="small" />}
+                onClick={() => onDuplicateModels(checkedKeys)}
+              >
+                {checkedKeys.length > 0 ? `复制 (${checkedKeys.length})` : "复制"}
+              </Button>
+            </span>
+          </Tooltip>
           <Tooltip title="删除已勾选的模型">
             <span>
               <Button
@@ -600,7 +616,7 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                   <span>{CACHE_COLUMN_LABEL}</span>
                 </Tooltip>
               </TableCell>
-              <TableCell sx={{ width: 76, textAlign: "center" }}>操作</TableCell>
+              <TableCell sx={{ width: 104, textAlign: "center" }}>操作</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -751,9 +767,18 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                               />
                               <Tooltip
                                 title={
-                                  model.name && model.name !== model.key
-                                    ? `${model.key} (${model.name})`
-                                    : model.key
+                                  <Box sx={{ whiteSpace: "pre-line" }}>
+                                    {[
+                                      model.name && model.name !== model.key
+                                        ? `${model.key} (${model.name})`
+                                        : model.key,
+                                      model.id && model.id !== model.key
+                                        ? `上游模型 ID：${model.id}`
+                                        : null,
+                                    ]
+                                      .filter(Boolean)
+                                      .join("\n")}
+                                  </Box>
                                 }
                               >
                                 <Box
@@ -765,6 +790,11 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                                   }}
                                 >
                                   {model.key}
+                                  {model.id && model.id !== model.key && (
+                                    <Box component="span" sx={{ color: "warning.main", fontWeight: 700, ml: 0.25 }}>
+                                      *
+                                    </Box>
+                                  )}
                                 </Box>
                               </Tooltip>
                             </Stack>
@@ -1168,6 +1198,15 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                             onClick={() => onOpenSingleEdit(model.key)}
                           >
                             <EditOutlinedIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        </Tooltip>
+                        <Tooltip title="复制模型">
+                          <IconButton
+                            size="small"
+                            aria-label={`复制模型 ${model.key}`}
+                            onClick={() => onDuplicateModels([model.key])}
+                          >
+                            <ContentCopyOutlinedIcon sx={{ fontSize: 16 }} />
                           </IconButton>
                         </Tooltip>
                         <Tooltip title="删除模型">

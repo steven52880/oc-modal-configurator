@@ -18,6 +18,7 @@ import {
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
+import ContentCopyOutlinedIcon from "@mui/icons-material/ContentCopyOutlined";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import ContentPasteGoIcon from "@mui/icons-material/ContentPasteGo";
@@ -63,6 +64,7 @@ interface ProviderTableProps {
   onOpenSingleEdit: (providerKey: string) => void;
   onOpenBatchEdit: () => void;
   onDeleteProviders: (keys: string[]) => void;
+  onDuplicateProviders: (keys: string[]) => void;
   onColumnWidthsCommit: (widths: Record<string, number>) => void;
   onStatusMessage: (message: string, severity?: "info" | "warning" | "error" | "success") => void;
 }
@@ -79,6 +81,7 @@ export const ProviderTable: React.FC<ProviderTableProps> = ({
   onOpenSingleEdit,
   onOpenBatchEdit,
   onDeleteProviders,
+  onDuplicateProviders,
   onColumnWidthsCommit,
   onStatusMessage,
 }) => {
@@ -308,6 +311,19 @@ export const ProviderTable: React.FC<ProviderTableProps> = ({
           >
             {checkedKeys.length > 0 ? `编辑 (${checkedKeys.length})` : "编辑"}
           </Button>
+          <Tooltip title="复制已勾选的提供商（含全部模型）">
+            <span>
+              <Button
+                size="small"
+                variant="outlined"
+                disabled={checkedKeys.length === 0}
+                startIcon={<ContentCopyOutlinedIcon fontSize="small" />}
+                onClick={() => onDuplicateProviders(checkedKeys)}
+              >
+                {checkedKeys.length > 0 ? `复制 (${checkedKeys.length})` : "复制"}
+              </Button>
+            </span>
+          </Tooltip>
           <Button
             size="small"
             variant="outlined"
@@ -405,7 +421,7 @@ export const ProviderTable: React.FC<ProviderTableProps> = ({
                   </TableCell>
                 );
               })}
-              <TableCell sx={{ width: 76, textAlign: "center" }}>操作</TableCell>
+              <TableCell sx={{ width: 104, textAlign: "center" }}>操作</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -622,6 +638,15 @@ export const ProviderTable: React.FC<ProviderTableProps> = ({
                             onClick={() => onOpenSingleEdit(provider.key)}
                           >
                             <EditOutlinedIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        </Tooltip>
+                        <Tooltip title="复制提供商（含全部模型）">
+                          <IconButton
+                            size="small"
+                            aria-label={`复制提供商 ${provider.key}`}
+                            onClick={() => onDuplicateProviders([provider.key])}
+                          >
+                            <ContentCopyOutlinedIcon sx={{ fontSize: 16 }} />
                           </IconButton>
                         </Tooltip>
                         <Tooltip title="删除提供商">
