@@ -55,6 +55,7 @@ import {
   validateTtl,
   validateWarmingInterval,
   validateWarmingDuration,
+  warmingConflict,
   VARIANT_META,
   type KnownModality,
 } from "../utils/modelHelpers";
@@ -509,6 +510,34 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
     if (cacheWarmingMode !== "unset") count += 1;
     return count;
   }, [cacheTtlMode, cacheWarmingMode]);
+
+  // 「缓存时长 + 预热」组合是否会让 opencode 跳过预热；混合/格式不合法时信息不足，不提示
+  const cacheWarmingConflictText = useMemo(() => {
+    if (cacheTtlMode === "__MIXED__" || cacheWarmingMode === "__MIXED__") return null;
+    const ttl =
+      cacheTtlMode === "5m"
+        ? "5m"
+        : cacheTtlMode === "1h"
+          ? "1h"
+          : cacheTtlMode === "custom" && !validateTtl(cacheTtlCustomText)
+            ? cacheTtlCustomText.trim() || null
+            : null;
+    if (cacheWarmingMode === "true") return warmingConflict(ttl, true);
+    if (cacheWarmingMode !== "custom") return null;
+    if (validateWarmingInterval(cacheWarmingIntervalText) || validateWarmingDuration(cacheWarmingDurationText)) {
+      return null;
+    }
+    return warmingConflict(ttl, {
+      interval: cacheWarmingIntervalText.trim() || null,
+      duration: cacheWarmingDurationText.trim() || null,
+    });
+  }, [
+    cacheTtlMode,
+    cacheTtlCustomText,
+    cacheWarmingMode,
+    cacheWarmingIntervalText,
+    cacheWarmingDurationText,
+  ]);
 
   const parseNumberField = (
     text: string,
@@ -1835,6 +1864,7 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
               <br />
               • 缓存时长只支持紧凑写法：5m、1h、30s、1d。
               <br />• 预热间隔/窗口必须写完整词，例如 "4 minutes"、"1 hour"、"auto"；写成 1h 会被 opencode 静默忽略。
+              <br />• 预热窗口默认 30 分钟：缓存时长（如 1h）比窗口长时 opencode 不会预热，需把窗口设得更长（如 "2 hours"）。
             </Typography>
 
             {/* Field 1: 缓存时长 (cache.ttl) */}
@@ -1945,6 +1975,12 @@ export const ModelEditSection: React.FC<ModelEditSectionProps> = ({
                     }}
                   />
                 </Box>
+              )}
+
+              {cacheWarmingConflictText && (
+                <Alert severity="warning" sx={{ mt: 2, py: 0.5, px: 1.5, fontSize: "0.8125rem" }}>
+                  {cacheWarmingConflictText}
+                </Alert>
               )}
             </Box>
           </Stack>

@@ -619,6 +619,70 @@ export function validateWarmingDuration(value: string): string | null {
   return null;
 }
 
+const TTL_UNIT_MS: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+
+function ttlToMs(value: string | null | undefined): number | null {
+  const match = /^([+-]?(?:\d+(?:\.\d+)?|\.\d+))(ms|s|m|h|d)$/.exec((value ?? "").trim());
+  if (!match) return null;
+  const ms = Number(match[1]) * TTL_UNIT_MS[match[2]];
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+function durationWordsToMs(value: string | null | undefined): number | null {
+  const match = /^(\d+(?:\.\d+)?)\s+([a-z]+)$/i.exec((value ?? "").trim());
+  if (!match) return null;
+  const unit = match[2].toLowerCase();
+  let factor: number | null = null;
+  if (/^(ms|milliseconds?)$/.test(unit)) factor = 1;
+  else if (/^(s|secs?|seconds?)$/.test(unit)) factor = 1000;
+  else if (/^(min|minutes?)$/.test(unit)) factor = 60_000;
+  else if (/^(h|hrs?|hours?)$/.test(unit)) factor = 3_600_000;
+  else if (/^(d|days?)$/.test(unit)) factor = 86_400_000;
+  else if (/^(w|weeks?)$/.test(unit)) factor = 604_800_000;
+  if (factor === null) return null;
+  const ms = Number(match[1]) * factor;
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+/** opencode 预热窗口的默认值（30 分钟）。 */
+const DEFAULT_WARMING_WINDOW_MS = 30 * 60_000;
+
+/**
+ * 判断「缓存时长 + 预热」这组配置在 opencode 里是否会白白开着、实际不预热。
+ * 规则来自 opencode 文档与本机 v2.2.7 的实际日志：
+ * - 自动间隔 = 缓存时长的 90%；间隔不短于窗口时跳过预热，日志为
+ *   "not warming: the prompt cache outlives the warming window"（例如 1h 缓存 + 默认 30 分钟窗口）。
+ * - 显式间隔不短于窗口时，opencode 同样拒绝并跳过预热。
+ * 返回给用户看的说明；没有问题（或信息不足）时返回 null。
+ */
+export function warmingConflict(
+  ttl: string | null | undefined,
+  warming: boolean | { interval: string | null; duration: string | null } | null | undefined,
+): string | null {
+  if (warming === null || warming === undefined || warming === false) return null;
+  const interval = typeof warming === "object" ? warming.interval?.trim() || null : null;
+  const duration = typeof warming === "object" ? warming.duration?.trim() || null : null;
+
+  const windowMs = duration === null ? DEFAULT_WARMING_WINDOW_MS : durationWordsToMs(duration);
+  if (windowMs === null) return null;
+  const windowText = duration ?? "30 minutes（默认）";
+
+  if (interval !== null && interval.toLowerCase() !== "auto") {
+    const intervalMs = durationWordsToMs(interval);
+    if (intervalMs !== null && intervalMs >= windowMs) {
+      return `预热不会生效：间隔 "${interval}" 不短于窗口 ${windowText}，opencode 会拒绝并跳过预热。请把间隔设得比窗口短。`;
+    }
+    return null;
+  }
+
+  const ttlMs = ttlToMs(ttl);
+  if (ttlMs === null) return null; // 未设置缓存时长：自动间隔为 4 分钟，不会冲突
+  if (ttlMs * 0.9 >= windowMs) {
+    return `预热不会生效：缓存时长 ${ttl} 比预热窗口 ${windowText} 还长，opencode 认为缓存本身已能撑过窗口，会直接跳过预热（日志：not warming: the prompt cache outlives the warming window）。需要预热就把「窗口」设得更长，例如 "2 hours"；不需要就把预热设为「未设置」或「关闭」。`;
+  }
+  return null;
+}
+
 export function readCacheFromModel(
   targets: ModelEntry[],
   isBatch: boolean,

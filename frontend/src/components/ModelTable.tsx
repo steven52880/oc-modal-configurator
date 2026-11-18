@@ -51,6 +51,7 @@ import {
   serializeModalities,
   serializeVariants,
   displayNpm,
+  warmingConflict,
   sortModelsForDisplay,
   type KnownModality,
 } from "../utils/modelHelpers";
@@ -63,12 +64,16 @@ type InlineColumnId = "key" | "context" | "output" | "npm";
 const CACHE_COLUMN_WIDTH = 64;
 const CACHE_COLUMN_LABEL = "缓存";
 
-function describeCache(model: ModelEntry): { short: string; full: string } {
+function describeCache(model: ModelEntry): { short: string; full: string; warn: boolean } {
   const cache = model.cache;
   const ttl = cache?.ttl ?? null;
   const warming = cache?.warming ?? null;
   if (!ttl && warming === null) {
-    return { short: "", full: "未设置：继承提供商，或使用 opencode 默认（Anthropic 为 5 分钟）" };
+    return {
+      short: "",
+      full: "未设置：继承提供商，或使用 opencode 默认（Anthropic 为 5 分钟）",
+      warn: false,
+    };
   }
   let warmingShort = "";
   let warmingFull = "";
@@ -87,10 +92,11 @@ function describeCache(model: ModelEntry): { short: string; full: string } {
     warmingFull = `预热：${parts.length > 0 ? parts.join("，") : "自定义（默认间隔）"}`;
   }
   const short = `${ttl ?? ""}${warmingShort}` || "—";
-  const full = [ttl ? `缓存时长：${ttl}` : "缓存时长：未设置（继承默认）", warmingFull]
+  const conflict = warmingConflict(ttl, warming);
+  const full = [ttl ? `缓存时长：${ttl}` : "缓存时长：未设置（继承默认）", warmingFull, conflict]
     .filter(Boolean)
     .join("；");
-  return { short, full };
+  return { short, full, warn: conflict !== null };
 }
 
 const DEFAULT_MODEL_WIDTHS: Record<ModelColumnId, number> = {
@@ -1144,7 +1150,7 @@ export const ModelTable: React.FC<ModelTableProps> = ({
 
                     {/* Column: cache (只读) */}
                     {(() => {
-                      const { short, full } = describeCache(model);
+                      const { short, full, warn } = describeCache(model);
                       return (
                         <TableCell
                           data-cache-cell="true"
@@ -1169,9 +1175,11 @@ export const ModelTable: React.FC<ModelTableProps> = ({
                                   height: 18,
                                   fontSize: "0.68rem",
                                   fontFamily: MONOSPACE_FONT,
-                                  backgroundColor: "rgba(27, 97, 201, 0.08)",
-                                  color: "primary.dark",
-                                  border: "1px solid rgba(27, 97, 201, 0.2)",
+                                  backgroundColor: warn ? "rgba(237, 108, 2, 0.12)" : "rgba(27, 97, 201, 0.08)",
+                                  color: warn ? "warning.dark" : "primary.dark",
+                                  border: warn
+                                    ? "1px solid rgba(237, 108, 2, 0.45)"
+                                    : "1px solid rgba(27, 97, 201, 0.2)",
                                   maxWidth: "100%",
                                   "& .MuiChip-label": { px: 0.5 },
                                 }}
